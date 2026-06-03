@@ -80,4 +80,10 @@ Mais fixes (cada um avança o jogo):
 - **Hooks EGL surface lifecycle** (jni_shim hook_egl): `AND_CreateEglSurface`/`AND_DestroyEglSurface`/`OS_ThreadMakeCurrent` hookados → create=bully_make_current, destroy=no-op, pq o jogo tentava destruir/recriar a surface (no PC é pbuffer, não window) → `AND_DestroyEglSurface` abortava.
 - Resultado: passa do abort do EGL; **thread "GameMain" sobe e roda** (é a thread de lógica/loading do jogo).
 
-**CRASH ATUAL:** thread **GameMain** (pós OSET_Resume + AttachCurrentThread), SIGSEGV; backtrace embaralhado (stack precisa debug por-thread cuidadoso). Estamos na fase de **bring-up iterativo do GameMain** (loading/render setup) — cada crash = 1 fix (gdb thread GameMain + objdump no .so). bully-NX faz a orquestração: forçar gamestate, tick flags, async file worker. **Provável próximo: o GameMain precisa do contexto GL na thread certa (makeCurrent) E/OU dos tick-flags/gamestate forçados.** Tudo no ref-bully-NX/jni_patch.c (frame loop ~1349+).
+**CRASH ATUAL (atualizado):** thread **GameMain**, SIGSEGV em **`ZIPFile::Find(this=NULL)`** (libGame+0x11f33e5, `mov (%r14),%rax` com r14=rdi=NULL). Uma ZIPFile* ficou NULL e o jogo chamou ->Find() nela.
+
+✅ **asset_archive CONFIRMADO funcionando**: indexou **1912 zip aliases** + IMG packs (act/598, scripts/532, stream/1787, objects/77 em data_0.zip). "missing data_2/3/4.zip.idx" é normal (só temos data_0/1). Logs em `gamefiles/debug.log` (debugPrintf escreve lá + stdout).
+
+Então o ZIPFile::Find(NULL) NÃO é o asset_archive — é um recurso específico/ordem-de-init no loading do GameMain. **PRÓXIMO:** rastrear o caller de ZIPFile::Find (qual arquivo/recurso; a bt é tail-call `jmp *rax` então embaralha — usar `gdb thread 19` + breakpoint em ZIPFile::Find/Initialize OU scan do que abriu a ZIPFile). Possivelmente um data file fora do index (asset_open retornou NULL) OU a orquestração GameMain do bully-NX (gamestate 0→2, tick flags) que ainda não portei. Crash anterior (perfprofile glGetString, AND_DestroyEglSurface abort) já resolvidos.
+
+**Trajetória completa:** load→0 unresolved→init_array→JNI_OnLoad→implOnInitialSetup→ActivityCreated→EGL→Surface→Resume→frame loop(0..31)→**gate Rockstar PASS**→GameMain sobe→asset_archive indexa 1912→**ZIPFile::Find(NULL)**. Cada sessão avança várias camadas.
