@@ -84,6 +84,14 @@ Mais fixes (cada um avança o jogo):
 
 ✅ **asset_archive CONFIRMADO funcionando**: indexou **1912 zip aliases** + IMG packs (act/598, scripts/532, stream/1787, objects/77 em data_0.zip). "missing data_2/3/4.zip.idx" é normal (só temos data_0/1). Logs em `gamefiles/debug.log` (debugPrintf escreve lá + stdout).
 
-Então o ZIPFile::Find(NULL) NÃO é o asset_archive — é um recurso específico/ordem-de-init no loading do GameMain. **PRÓXIMO:** rastrear o caller de ZIPFile::Find (qual arquivo/recurso; a bt é tail-call `jmp *rax` então embaralha — usar `gdb thread 19` + breakpoint em ZIPFile::Find/Initialize OU scan do que abriu a ZIPFile). Possivelmente um data file fora do index (asset_open retornou NULL) OU a orquestração GameMain do bully-NX (gamestate 0→2, tick flags) que ainda não portei. Crash anterior (perfprofile glGetString, AND_DestroyEglSurface abort) já resolvidos.
+Então o ZIPFile::Find(NULL) NÃO é o asset_archive.
+
+### RASTREADO (precisão total): ZIPFile::Find(NULL) ← OS_ZipFileOpen ← registro de zips vazio/NULL
+- Crash: `ZIPFile::Find(this=NULL)` (libGame+0x11f33e5, `mov (%r14),%rax`, r14=this=NULL), na thread **GameMain**.
+- Caller: **`OS_ZipFileOpen(path, &handle)`** (+0x107) — itera um **registro global de ZIPFiles** (begin=[0x16239a8], end=[0x16239b0]) e chama `ZIPFile::Find` em cada; uma entrada é NULL.
+- O registro é populado por **`OS_ZipAdd(path)`** (exportado, `_Z9OS_ZipAddPKc`) que faz `ZIP_FileCreate(path)`. **xref=0: o libGame NUNCA chama OS_ZipAdd sozinho** — é API EXTERNA (o launcher Java registra os data zips). `AND_FileInitialize` usa NvFOpen/NvFRead/NvFIsApkFile.
+- **TENTEI chamar OS_ZipAdd("data_0.zip")/"data_1.zip" no driver + symlink dos zips no cwd → NÃO resolveu** (ZIP_FileCreate ainda dá NULL; e o crash já ocorria sem isso). 
+- **CAUSA REAL / FIX = portar o `zip_fs.c` do bully-NX**: ele intercepta **`fopen`** (via funopen + minizip) e serve os arquivos de DENTRO dos data_*.zip transparentemente — NÃO usa OS_ZipAdd. bully-NX combina: asset_archive (NvAPK) + **zip_fs (fopen)** + check_data (stat). É o componente de I/O que falta (ref-bully-NX/source/zip_fs.c, usa libminizip). Provável que o jogo abre arquivos via fopen/NvF que precisam ser servidos de dentro dos zips.
+Crash anterior (perfprofile glGetString, AND_DestroyEglSurface abort) já resolvidos.
 
 **Trajetória completa:** load→0 unresolved→init_array→JNI_OnLoad→implOnInitialSetup→ActivityCreated→EGL→Surface→Resume→frame loop(0..31)→**gate Rockstar PASS**→GameMain sobe→asset_archive indexa 1912→**ZIPFile::Find(NULL)**. Cada sessão avança várias camadas.

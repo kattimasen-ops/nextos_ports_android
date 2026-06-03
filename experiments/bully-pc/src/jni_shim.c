@@ -289,6 +289,16 @@ void jni_load(void) {
   OnInitialSetup(fake_env, NULL, NULL, NULL, NULL, NULL);
   fprintf(stderr, "[drv] implOnInitialSetup OK\n");
 
+  /* registra os data zips (o jogo exporta OS_ZipAdd p/ o launcher chamar; libGame nao chama sozinho).
+     Sem isso, OS_ZipFileOpen itera registro vazio -> ZIPFile::Find(NULL) -> crash no GameMain. */
+  void (*OS_ZipAdd)(const char *) = (void *)so_symbol(&mod_game, "_Z9OS_ZipAddPKc");
+  if (OS_ZipAdd) {
+    fprintf(stderr, "[drv] OS_ZipAdd data_0.zip / data_1.zip ...\n");
+    OS_ZipAdd("data_0.zip");
+    OS_ZipAdd("data_1.zip");
+    fprintf(stderr, "[drv] OS_ZipAdd OK\n");
+  }
+
   if (isInit && *isInit != 1) *isInit = 1;
   if (suspended) *suspended = 0;
   if (canRender) *canRender = 1;
