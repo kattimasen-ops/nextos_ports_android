@@ -101,6 +101,14 @@ static void my_glShaderSource(unsigned sh, int count, const char *const *str,
   char *s3 =
       str_replace_all(s2, "gl_Position.xyz *= gl_Position.w;",
                       "gl_Position.xy *= gl_Position.w; gl_Position.z *= 0.01;");
+  // im2d (2D) NÃO deve ter fog: as nuvens do céu são sprites 2D e o Clouds.cpp
+  // não desliga o fog -> ficavam pretas (cor do fog). u_xform é exclusivo do
+  // im2d, então só o 2D perde o fog (o fog do mundo 3D fica intacto).
+  if (strstr(s3, "u_xform")) {
+    char *sf = str_replace_all(s3, "v_fog = DoFog(gl_Position.w);", "v_fog = 1.0;");
+    free(s3);
+    s3 = sf;
+  }
   free(cat);
   free(s1);
   free(s2);
