@@ -240,3 +240,17 @@ asset_archive, thread orchestration, async worker, zip_fs, hooks make/unmake/scr
 4. Aplicar receitas Mali-450 GLES2 do reVC: shaders highp->mediump/MAX_LIGHTS, GL_RGBA8->GLES2,
    GL_TEXTURE_MAX_LEVEL->força GL_LINEAR, pthread ABI bionic->glibc (já temos pthread_bridge no reVC).
 5. Deploy + teste no device (precisa device ON/SSH). gptokeyb p/ controle.
+
+## 🏆🏆🏆 BULLY RODANDO + RENDERIZANDO NO MALI-450 (2026-06-08) — INÉDITO MUNDIAL
+**O JOGO RENDERIZA:** cena de abertura "Welcome to Bullworth" (carro na rua, academia, grama/folhas,
+personagem) — mundo 3D completo, texturas e CORES CORRETAS no Mali-450 MP / OpenGL ES 2.0!
+**fbgrab ENGANAVA:** convertia o fb pra branco (formato errado). O raw /dev/fb0 estava PRETO+conteúdo
+o tempo todo. CAPTURA CERTA = `dd if=/dev/fb0 + PIL frombytes RGBA raw BGRA` (fb 1280x720x4 BGRA).
+**Cadeia completa que FUNCIONA no device:** loader AArch64 (so_util multi-modulo) -> libc++ + libGame
+(18.5MB) -> JNI estatico -> gates -> OS_ZipAdd (zip loading, fix do pool de trampolins 4-byte) ->
+SDL2-mali EGL (1280x720 GLES2) -> Rockstar gate -> whitetexture.tex (data_2/3/4 reais) -> render loop
+(eglMakeCurrent ok=1 + unmake handoff) -> fixes GLES2 (highp->mediump, RGBA8->RGBA, MAX_LEVEL/mipmap,
+glClear cor) -> MENU/MUNDO na TV. swap via eglSwapBuffers do game + SDL_GL_SwapWindow.
+**Screenshot: /home/felipe/BULLY-MALI450-PRIMEIRO-RENDER.png**
+**FALTA (polish):** controle (jni_shim ja tem SDL gamecontroller; testar/gptokeyb), audio (OpenAL,
+funcionava no PC), empacotar ES, gerar gamecontrollerdb. Mas o CORE esta FEITO.
