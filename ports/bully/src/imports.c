@@ -152,30 +152,12 @@ static void my_glShaderSource(unsigned sh, int count, const char *const *str, co
    * Forçar mediump no VERTEX quebra a precisão do skinning -> braços/corpo do
    * Jimmy (muita deformação) colapsam/NaN -> invisíveis. Então só troca
    * highp->mediump nos shaders de FRAGMENTO (mantém highp no vertex). */
+  /* só fragment: highp->mediump (Utgard PP não tem highp). Vertex mantém highp
+   * (skinning). NÃO mexer no threshold do alpha-test (0.04 dava contorno preto
+   * na folhagem) — fica o 0.7 original. */
   int is_vertex = strstr(cat, "gl_Position") != NULL;
-  char *s0 = is_vertex ? strdup(cat) : str_replace_all(cat, "highp", "mediump");
+  char *s1 = is_vertex ? strdup(cat) : str_replace_all(cat, "highp", "mediump");
   free(cat);
-  /* PALETTE DE OSSOS: o engine gerou bones[180]=60 ossos (limite Mali-450 256
-   * uniforms). O Jimmy (jogável) tem >60 ossos -> braços/camisa referenciam
-   * índice 60+ -> fora do array -> colapsa -> INVISÍVEL. Aumenta p/ 80 ossos
-   * (bones[240]: 240+overhead ainda <256). */
-  /* TESTE: clampa o índice de osso ao range realmente enviado (0..59). Se o
-   * jogo só faz upload de 60 ossos e o corpo do Jimmy referencia 60+, eles leem
-   * ZERO -> matriz zero -> vértice no origin (colapsa). Clampar usa um osso
-   * válido -> corpo VISÍVEL (mesmo que deformado) e confirma a causa. */
-  char *sb = str_replace_all(s0, "ivec4(Attr2)", "ivec4(clamp(Attr2,0.0,59.0))");
-  free(s0);
-  /* alpha-test do Jimmy: `if (gl_FragColor.a < 0.7) discard`. No Mali a LUMINANCE
-   * é amostrada como (L,L,L,L) -> alpha = L (escuro) < 0.7 -> descarta a camisa.
-   * Baixa o limiar p/ 0.04 (só descarta alpha quase-zero = recortes reais de
-   * folhagem; a camisa, L>0.04, passa). Combina com a conversão LUMINANCE->RGBA. */
-  char *s1 = str_replace_all(sb, "< 0.7)", "< 0.04)");
-  free(sb);
-  if (!is_vertex && strstr(s1, "discard")) {
-    static int dc = 0;
-    char p[128]; snprintf(p, sizeof(p), "/storage/roms/ports/bully/shaders/disc_%d.glsl", dc++);
-    FILE *f = fopen(p, "w"); if (f) { fputs(s1, f); fclose(f); }
-  }
   const char *one = s1;
   if (real_glShaderSource) real_glShaderSource(sh, 1, &one, NULL);
   free(s1);
@@ -251,15 +233,9 @@ static void my_glTexSubImage2D(unsigned t,int l,int xo,int yo,int w,int h,unsign
  * do corpo fica vazia -> camisa preta+discard. */
 static void (*real_glBindFramebuffer)(unsigned, unsigned) = NULL;
 static void my_glBindFramebuffer(unsigned t, unsigned fb) {
+  /* passthrough limpo (o glFinish de teste saturava o device -> removido) */
   if (!real_glBindFramebuffer) real_glBindFramebuffer = dlsym(RTLD_DEFAULT, "glBindFramebuffer");
   if (real_glBindFramebuffer) real_glBindFramebuffer(t, fb);
-  static int n = 0;
-  if (fb != 0 && n < 14) {
-    unsigned (*chk)(unsigned) = dlsym(RTLD_DEFAULT, "glCheckFramebufferStatus");
-    unsigned s = chk ? chk(0x8D40) : 0; /* GL_FRAMEBUFFER */
-    fprintf(stderr, "[fbo] BIND fbo=%u status=0x%x %s\n", fb, s, s == 0x8CD5 ? "COMPLETE" : (s ? "INCOMPLETO!" : "?"));
-    n++;
-  }
 }
 static void (*real_glFramebufferTexture2D)(unsigned,unsigned,unsigned,unsigned,int) = NULL;
 static void my_glFramebufferTexture2D(unsigned t,unsigned att,unsigned tt,unsigned tex,int lvl) {

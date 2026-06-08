@@ -263,15 +263,26 @@ static int load_zip_index_file(const char *idx_name)
   return 0;
 }
 
+/* índice ordenado p/ bsearch O(log n). A varredura LINEAR (60418 itens) por
+ * open travava ao entrar na escola: milhares de opens × 60418 strcmps =
+ * centenas de milhões de comparações no CPU lento -> parecia travado.
+ * Lazy-sort na 1ª busca (todos os entries já foram carregados no init). */
+static int g_zip_sorted = 0;
+static int cmp_zip_entry(const void *a, const void *b)
+{
+  return strcmp(((const ZipIndexEntry *)a)->path, ((const ZipIndexEntry *)b)->path);
+}
 static const ZipIndexEntry *find_zip_entry(const char *normalized_path)
 {
-  size_t i;
-  for (i = 0; i < g_zip_entry_count; i++)
+  ZipIndexEntry key;
+  if (!g_zip_sorted)
   {
-    if (strcmp(g_zip_entries[i].path, normalized_path) == 0)
-      return &g_zip_entries[i];
+    qsort(g_zip_entries, g_zip_entry_count, sizeof(ZipIndexEntry), cmp_zip_entry);
+    g_zip_sorted = 1;
   }
-  return NULL;
+  key.path = (char *)normalized_path;
+  return (const ZipIndexEntry *)bsearch(&key, g_zip_entries, g_zip_entry_count,
+                                        sizeof(ZipIndexEntry), cmp_zip_entry);
 }
 
 static AssetHandle *asset_handle_from_file(FILE *fp)
