@@ -227,15 +227,16 @@ void bully_flush_pending_clear(void) { /* chamado pelos draws dentro do FBO */
 }
 static void my_glClear(unsigned mask) {
   extern int g_in_fbo, g_rtt_clears;
-  if (g_defer_clear < 0) g_defer_clear = getenv("BULLY_DEFER_CLEAR") ? 1 : 0;
   if (!real_glClear) real_glClear = dlsym(RTLD_DEFAULT, "glClear");
-  /* dentro de render-to-texture: ADIA o clear. Se vier um draw -> limpa+desenha
-   * (composição normal). Se NÃO vier draw (composite "clear-only") -> pula o
-   * clear no unbind -> a roupa já composta NÃO é apagada. */
-  if (g_defer_clear && g_in_fbo) { g_rtt_clears++; g_pending_clear = mask | 0x4000; return; }
   if (g_in_fbo) g_rtt_clears++;
-  if (g_cleardbg < 8) { fprintf(stderr, "[gl] glClear mask=0x%x -> 0x%x\n", mask, mask | 0x4000); g_cleardbg++; }
-  if (real_glClear) real_glClear(mask | 0x4000);
+  /* CAUSA-RAIZ da roupa que some: este wrapper forçava GL_COLOR_BUFFER_BIT em
+   * TODO clear (fix de tela preta). Dentro do render-to-texture da roupa, o jogo
+   * faz clear só de PROFUNDIDADE -> o nosso force-COLOR APAGAVA a cor (a roupa já
+   * composta). FIX: forçar COR só FORA de FBO (a tela). Dentro de FBO, respeita
+   * a máscara do jogo (clear de profundidade NÃO apaga a roupa). */
+  unsigned m = g_in_fbo ? mask : (mask | 0x4000);
+  if (g_cleardbg < 12) { fprintf(stderr, "[gl] glClear in_fbo=%d mask=0x%x -> 0x%x\n", g_in_fbo, mask, m); g_cleardbg++; }
+  if (real_glClear) real_glClear(m);
 }
 /* glTexStorage2D (GLES3) — a camisa do Jimmy pode vir por aqui (não pelo
  * glTexImage2D). Loga formato/níveis. */
