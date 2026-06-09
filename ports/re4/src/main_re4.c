@@ -176,6 +176,16 @@ static FILE* my_fopen(const char*p,const char*m){ if(p&&(strstr(p,"proc")||strst
   return fopen(p,m); }
 static int my_open(const char*p,int fl,...){ if(p&&(strstr(p,"proc")||strstr(p,"mem"))) fprintf(stderr,"[OPEN] %s\n",p);
   va_list ap; va_start(ap,fl); int mo=va_arg(ap,int); va_end(ap); return open(p,fl,mo); }
+/* ANativeWindow: a Unity (nativeRecreateGfxState) chama ANativeWindow_fromSurface(env,surface)
+   e ESPERA num cond ate o global de window virar !=NULL. Estavam STUBADOS (retornavam NULL)
+   -> Unity guardava NULL -> UnityMain travava p/ sempre. Retornamos window fake !=NULL + dims. */
+static int g_anw=0xA11;
+static void *my_aw_fromSurface(void*env,void*surf){ (void)env;(void)surf; fprintf(stderr,"[ANW] fromSurface -> %p\n",(void*)&g_anw); return &g_anw; }
+static int my_aw_setgeom(void*w,int wd,int ht,int f){ (void)w;(void)wd;(void)ht;(void)f; return 0; }
+static int my_aw_getWidth(void*w){ (void)w; return 1280; }
+static int my_aw_getHeight(void*w){ (void)w; return 720; }
+static void my_aw_acquire(void*w){ (void)w; }
+static void my_aw_release(void*w){ (void)w; }
 extern void *text_virtbase;
 extern void re4_fill(void);
 extern void recon_wire_pthread(void (*)(const char *, void *));
@@ -202,7 +212,13 @@ static void **tls_slots(void){ tls_ensure(); void **s=(void**)pthread_getspecifi
 static int sh_key_create(pthread_key_t *k, void(*d)(void*)){ static int kc=0; if(kc++<8)fprintf(stderr,"[TLS] key_create dtor=%p\n",d); pthread_mutex_lock(&g_slot_mtx);
   int n=g_slot_next++; pthread_mutex_unlock(&g_slot_mtx); if(n>=NSLOT) return 11; *k=(pthread_key_t)n; return 0; }
 static int sh_key_delete(pthread_key_t k){ fprintf(stderr,"[TLS] key_delete %d (no-op)\n",(int)k); return 0; }
-static void *sh_getspecific(pthread_key_t k){ if((int)k<=0||(int)k>=NSLOT){ static int g=0; if(g++<30)fprintf(stderr,"[TLS-GET-BADKEY] k=%d tid=%ld\n",(int)k,(long)pthread_self()); return NULL; } void**arr=tls_slots(); void*v=arr[(int)k]; if(!v){static int g2=0; if(g2++<999)fprintf(stderr,"[TLS-GET-NULL] k=%d tid=%p arr=%p\n",(int)k,(void*)pthread_self(),(void*)arr);} return v; }
+static void map_caller(const char*tag,unsigned long ra);
+static void *sh_getspecific(pthread_key_t k){ if((int)k<=0||(int)k>=NSLOT){ static int g=0; if(g++<30)fprintf(stderr,"[TLS-GET-BADKEY] k=%d tid=%ld\n",(int)k,(long)pthread_self()); return NULL; } void**arr=tls_slots(); void*v=arr[(int)k];
+  if(!v){static int g2=0; if(((int)k==7||(int)k==15) && g2++<4){ fprintf(stderr,"[TLS-GET-NULL] k=%d tid=%p stackscan:\n",(int)k,(void*)pthread_self());
+    unsigned long sp; __asm__ volatile("mov %0, sp":"=r"(sp)); unsigned long mb=g_mono_base,ub=(unsigned long)text_virtbase; int hits=0;
+    for(int i=0;i<400 && hits<14;i++){ unsigned long w=*(unsigned long*)(sp+i*4);
+      if(mb&&w>=mb&&w<mb+0x600000){ fprintf(stderr,"   libmono+0x%lx\n",w-mb); hits++; }
+      else if(w>=ub&&w<ub+0x2000000){ fprintf(stderr,"   unity+0x%lx\n",w-ub); hits++; } } }} return v; }
 static int sh_setspecific(pthread_key_t k, const void *v){ if((int)k<=0||(int)k>=NSLOT) return 22; void**arr=tls_slots(); if(v){static int st=0; if(st++<2000)fprintf(stderr,"[TLS-SET] k=%d v=%p tid=%p arr=%p\n",(int)k,v,(void*)pthread_self(),(void*)arr);} arr[(int)k]=(void*)v; return 0; }
 /* __android_log REAL -> stderr (sem isso, o erro do engine antes do abort some) */
 static int my_alog_print(int prio,const char*tag,const char*fmt,...){ va_list ap; va_start(ap,fmt);
@@ -303,6 +319,12 @@ int main(void){
   re4_set_import("dlerror",(void*)my_dlerror);
   re4_set_import("dladdr",(void*)my_dladdr);
   re4_set_import("dlclose",(void*)my_dlclose);
+  re4_set_import("ANativeWindow_fromSurface",(void*)my_aw_fromSurface);
+  re4_set_import("ANativeWindow_setBuffersGeometry",(void*)my_aw_setgeom);
+  re4_set_import("ANativeWindow_getWidth",(void*)my_aw_getWidth);
+  re4_set_import("ANativeWindow_getHeight",(void*)my_aw_getHeight);
+  re4_set_import("ANativeWindow_acquire",(void*)my_aw_acquire);
+  re4_set_import("ANativeWindow_release",(void*)my_aw_release);
   re4_set_import("mmap",(void*)my_mmap);
   re4_set_import("mprotect",(void*)my_mprotect);
   re4_set_import("sysconf",(void*)my_sysconf);

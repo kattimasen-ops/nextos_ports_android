@@ -221,6 +221,13 @@ void jni_run(void) {
     fprintf(stderr, "[input] text_base=0x%lx controller_base=0x%lx\n", (unsigned long)tb, (unsigned long)g_ctrl_base); }
   g_ctrl_probe = getenv("SONIC_FORCEINPUT") != NULL;
   fprintf(stderr, "[input] OnKeyEvent=%p\n", (void *)g_onkey);
+  /* ---- PATCH: GetCloudSaveConflictState() -> sempre 0 (port offline, sem cloud).
+   * Sem isso ela retorna 1 e BLOQUEIA o PressButton (gate==1 = return antes de
+   * checar botao). Original: ldr w0,[x0,#60]; ret  ->  mov w0,#0; ret ---- */
+  { uintptr_t gc = so_find_addr_safe("_ZN4RSDK3SKU11UserStorage25GetCloudSaveConflictStateEv");
+    if (gc) { so_make_text_writable(); *(uint32_t*)gc = 0x52800000u; /* movz w0,#0 */
+      so_make_text_executable(); so_flush_caches();
+      fprintf(stderr, "[patch] GetCloudSaveConflictState -> 0 @%p\n", (void*)gc); } }
   { int nj = SDL_NumJoysticks(); fprintf(stderr, "[input] %d joysticks\n", nj);
     for (int i=0;i<nj;i++){ if (SDL_IsGameController(i)) { SDL_GameControllerOpen(i); fprintf(stderr,"[input] gamecontroller %d aberto\n",i);} else { SDL_JoystickOpen(i); fprintf(stderr,"[input] joystick RAW %d aberto (%s)\n",i,SDL_JoystickNameForIndex(i)); } } }
   fprintf(stderr, "[drv] entrando no loop step\n");
@@ -255,7 +262,40 @@ void jni_run(void) {
     }
 
     { static uintptr_t sa2=0; if(!sa2) sa2=so_find_addr_safe("_ZN4RSDK5Audio15deviceAvailableE"); if(sa2)*(int*)sa2=1; }
+    /* ---- FIX (ANTES do step): título trava em WaitForConflictState (espera um
+     * cloud-save conflict que nunca chega no port offline). Força o estado p/
+     * PressButton ANTES do step p/ que PressButton esteja ativo quando o EDGE do
+     * press chega (gate GetCloudSaveConflictState==0 libera a checagem de botão). ---- */
+    { uintptr_t tb = (uintptr_t)g_copyslot - 0x17d9bc;
+      static uintptr_t getent=0; if(!getent) getent=so_find_addr_safe("_ZN4RSDK12ObjectSystem9GetEntityEt");
+      if (getent) { uintptr_t ent=((uintptr_t(*)(unsigned))getent)(0);
+        if (ent) { uintptr_t *st_field=(uintptr_t*)(ent+96);
+          if (*st_field == tb+0x31c454) { *st_field = tb+0x31c5f4; /* WaitForConflictState->PressButton */
+            static int once=0; if(!once){once=1;fprintf(stderr,"[fix] forcado WaitForConflictState->PressButton\n");} } } } }
     ((void (*)(void *, void *, float))st)(fake_env, fake_thiz, 60.0f);
+    /* ---- DIAG PressButton: a cada frame, se estado==PressButton, amostra
+     * controller[0].press + self->timer[112] + gate, p/ ver se o press é detectado ---- */
+    { uintptr_t tb = (uintptr_t)g_copyslot - 0x17d9bc;
+      uintptr_t ci = *(uintptr_t*)(tb + 0x4a76c8);
+      static uintptr_t getent=0; if(!getent) getent=so_find_addr_safe("_ZN4RSDK12ObjectSystem9GetEntityEt");
+      static int max_press=0, in_pb=0; static int last_timer=-1;
+      if (getent) { uintptr_t ent=((uintptr_t(*)(unsigned))getent)(0);
+        if (ent) { uintptr_t stp=*(uintptr_t*)(ent+96);
+          if (stp==tb+0x31c5f4) { in_pb=1;
+            if (ci){ int *p=(int*)ci; for(int k=0;k<12;k++) if(p[k*3+1]) max_press=1; }
+            int timer=*(int*)(ent+112);
+            if (timer!=last_timer && (timer<6 || timer%60==0)) {
+              uintptr_t gatep=*(uintptr_t*)(tb+0x4a7938);
+              int gr = gatep?((int(*)(void))gatep)():-9;
+              fprintf(stderr,"[pb] timer=%d max_press=%d gate=%d ci_start(d%d,p%d)\n",
+                timer,max_press, gr, ci?((int*)ci)[30]:-1, ci?((int*)ci)[31]:-1);
+              last_timer=timer; }
+          } else if (in_pb && stp!=tb+0x31c5f4) {
+            const char*nm="?"; if(stp==tb+0x31cafc)nm="FadeToScene"; else if(stp==tb+0x31cb2c)nm="FadeToVideo";
+            fprintf(stderr,"[pb] SAIU de PressButton -> %s (0x%lx)\n",nm,(unsigned long)(stp-tb)); in_pb=0; }
+        }
+      }
+    }
     /* { extern void opensles_shim_pump_callbacks(void); opensles_shim_pump_callbacks(); } DISABLED p/ isolar crash */
     { extern int g_drawcount; static int last=0;
       if (f%30==0) { fprintf(stderr, "[loop] frame %ld draws=%d (+%d) glErr=0x%x\n", f, g_drawcount, g_drawcount-last, glGetError()); last=g_drawcount; }
