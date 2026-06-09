@@ -449,6 +449,10 @@ int main(void){
           a=so_find_addr_safe("mono_exception_from_name"); if(a)hook_arm64(a,(uintptr_t)hook_exc_name);
         }
         a=so_find_addr_safe("mono_valloc"); if(a)hook_arm64(a,(uintptr_t)my_mono_valloc);
+        /* o C# do jogo chama GC.Collect (mono_gc_collect) no init -> stop-the-world trava (suspensao
+           de thread por sinal nao sincroniza no bionic/glibc). No-op pula o GC explicito. Gated. */
+        if(getenv("RE4_NOGCCOLLECT")){ a=so_find_addr_safe("mono_gc_collect"); if(a){hook_arm64(a,(uintptr_t)jobwait_stub); fprintf(stderr,"[HOOK] mono_gc_collect -> no-op\n");}
+          a=so_find_addr_safe("mono_gc_collect_a_little"); if(a)hook_arm64(a,(uintptr_t)jobwait_stub); }
         a=so_find_addr_safe("mono_pagesize"); if(a){hook_arm64(a,(uintptr_t)my_mono_pagesize); fprintf(stderr,"[HOOK] mono_pagesize -> 4096\n");}
         { uintptr_t ps=so_find_addr_safe("mono_pagesize"); uintptr_t base=ps-0x29d7e4; uintptr_t gt=base+0x1a6a8;
           g_mono_base=base;

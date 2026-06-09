@@ -14,6 +14,7 @@
 #include "util.h" /* ret0 */
 #include "opensles_shim.h"
 #include <string.h>
+#include <sys/mman.h>
 
 static char fake_env[0x1000];
 static char fake_vm[0x100];
@@ -125,6 +126,27 @@ static void (*g_onkey)(void *, void *, int, int) = NULL;
 static void (*g_copyslot)(void *, unsigned) = NULL;
 static uintptr_t g_ctrl_base = 0;
 static int g_ctrl_probe = 0;
+
+/* ---- FIX realce do menu: hook em UIButton_Draw. Antes de desenhar, se o botão
+ * é o selecionado (isSelected@+328==1), força buttonBounceOffset@+396 a um valor
+ * pulsante (levanta o botão -> mostra a cor por baixo = destaque). O engine zera
+ * o offset dentro do step antes do Draw, por isso forçamos AQUI (na hora do Draw),
+ * não no loop. self = SceneInfo->entity (= *(*(tb+0x4a7098))). ---- */
+long g_menufix_frame = 0;
+static int g_menufix_on = 1;
+static void (*g_uibtn_tramp)(void) = NULL;
+static uintptr_t g_sceneinfo_addr = 0;
+static void my_uibutton_draw(void) {
+  if (g_menufix_on && g_sceneinfo_addr) {
+    uintptr_t si = *(uintptr_t *)g_sceneinfo_addr;     /* &sceneInfo */
+    uintptr_t self = si ? *(uintptr_t *)si : 0;        /* sceneInfo.entity (offset 0) */
+    if (self && *(int *)(self + 328) == 1) {           /* isSelected */
+      long f = g_menufix_frame; int ph = (int)(f & 31); int tri = ph < 16 ? ph : 32 - ph;
+      *(int *)(self + 396) = 0x18000 + tri * 0x1800;   /* pulso ~1.5..3px */
+    }
+  }
+  if (g_uibtn_tramp) g_uibtn_tramp();
+}
 static int sdl_key_to_android(int sc) {
   switch (sc) {
     case SDL_SCANCODE_UP: return 19; case SDL_SCANCODE_DOWN: return 20;
@@ -247,6 +269,21 @@ void jni_run(void) {
     if (tb0) { *(uint32_t*)(tb0+0x4453a4)=0xd65f03c0u; /* Stats::TryTrackStat ret */
       *(uint32_t*)(tb0+0x4457f8)=0xd65f03c0u; /* DummyStats::TrackStat ret */
       fprintf(stderr, "[patch] Stats::TryTrackStat/TrackStat -> ret (no-op)\n"); }
+    /* ---- HOOK UIButton_Draw (realce do menu): trampolim com os 4 prólogos + jump p/ +16 ---- */
+    g_menufix_on = getenv("SONIC_MENUFIX") ? 1 : 0; /* OFF por padrão (realce do menu, não testado) */
+    if (tb0 && g_menufix_on) {
+      g_sceneinfo_addr = tb0 + 0x4a7098;
+      uintptr_t ud = tb0 + 0x1ab7dc; /* UIButton_Draw */
+      uint32_t *tr = (uint32_t*)mmap(NULL, 64, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+      if (tr != MAP_FAILED) {
+        memcpy(tr, (void*)ud, 16);
+        tr[4]=0x58000051u; tr[5]=0xd61f0220u; *(uint64_t*)(tr+6)=ud+16;
+        __builtin___clear_cache((char*)tr,(char*)tr+64);
+        g_uibtn_tramp=(void(*)(void))tr;
+        hook_arm64(ud, (uintptr_t)my_uibutton_draw);
+        fprintf(stderr,"[menufix] hook UIButton_Draw=%p tramp=%p\n",(void*)ud,(void*)tr);
+      } else fprintf(stderr,"[menufix] mmap trampolim FALHOU\n");
+    }
     so_make_text_executable(); so_flush_caches(); }
   { int nj = SDL_NumJoysticks(); fprintf(stderr, "[input] %d joysticks\n", nj);
     for (int i=0;i<nj;i++){ if (SDL_IsGameController(i)) { SDL_GameControllerOpen(i); fprintf(stderr,"[input] gamecontroller %d aberto\n",i);} else { SDL_JoystickOpen(i); fprintf(stderr,"[input] joystick RAW %d aberto (%s)\n",i,SDL_JoystickNameForIndex(i)); } } }
@@ -473,6 +510,8 @@ void jni_run(void) {
       char st[40]; int act=0; for(int c=0;c<16;c++){ int s=ch?*(unsigned char*)(ch+c*40+39):-1; st[c]='0'+(s&7); if(s)act++; } st[16]=0;
       float v0=en?*(float*)(en):-1, v4=en?*(float*)(en+4):-1, v8=en?*(float*)(en+8):-1;
       fprintf(stderr,"[snd2] chStates=%s active=%d vol(+0=%.2f +4=%.2f +8=%.2f)\n", st, act, v0,v4,v8); }
+    /* realce do menu agora é via hook em UIButton_Draw (g_menufix_frame p/ o pulso) */
+    g_menufix_frame = f;
     { extern int g_drawcount; static int last=0;
       if (f%30==0) { fprintf(stderr, "[loop] frame %ld draws=%d (+%d) glErr=0x%x\n", f, g_drawcount, g_drawcount-last, glGetError()); last=g_drawcount; }
       if (f%120==1) fprintf(stderr, "[state] running=%d container=%d info=%d %d %d %d\n",
