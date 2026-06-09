@@ -91,3 +91,26 @@ android_shim/egl_shim do build (Dusklight=SDL_main+SDL3 estático, não NativeAc
   ASensor*/ALooper* (sensores/looper) → stub/ALooper mínimo.
 Device: /storage/roms/dusklight-recon/ (libmain.so+dusklight). Run: SDL_VIDEODRIVER=mali
 LD_LIBRARY_PATH=/usr/lib32:/usr/lib ./dusklight. Assets data1 (1.46GB) ainda NÃO deployados.
+
+## F1✅→F2 (sessão 2 cont.): init+JNI+SDL_main RODANDO! muro=SDL3 Android backend (env cache)
+3 FIXES GRANDES destravaram do init até SDL_main (commit 10ceb07+seguintes):
+1. **so_load copiava só 2 PT_LOAD** mas libmain tem 9 PHs → `.init_array` num segmento NÃO-copiado
+   (slots zerados → init_array TODO = base+0 → SIGILL chamando text_base+0). FIX: copiar TODOS PT_LOAD.
+2. **RELR** (`.relr.dyn` ANDROID_RELR): clang-21 põe TODAS as relocs RELATIVE no RELR (0 RELATIVE em
+   .rela.dyn!). so_relocate não tratava → vtables/func-ptrs não-relocados. FIX: add handling RELR
+   (formato: entry par=endereço+aplica; ímpar=bitmap dos 63 words; *where+=base). so_util.c.
+3. **jni_shim_get_vm retornava tabela ZERADA** → JNI_OnLoad crashava em vm->GetEnv (idx6=NULL).
+   FIX: jni_shim_init (VM real: vm_GetEnv/Attach + JNIEnv completo). main.c chama JNI_OnLoad c/ ela.
++ bionic_shims.c (_chk→glibc, __sF buffer, __system_property_get, ZSTD no-op), android_ndk_shims.c
+  (ASensor/ALooper/ANativeWindow/AAsset stubs), -rdynamic (fallback acha shims), setvbuf unbuffered.
+**AGORA RODA**: init_array(171 ok) → JNI_OnLoad registra classes SDL (SDLActivity/SDLAudioManager/
+SDLControllerManager/HIDDeviceManager) → JNI_OnLoad=0x10004 → SDL_SetMainReady → **SDL_main chamado**.
+**MURO ATUAL (F2):** crash em `SDL_GetAndroidInternalStoragePath` (via dusk::data::initialize_data →
+SDL_SYS_GetPrefPath). Faz `Android_JNI_GetEnv()` (env CACHEADO do JNI_OnLoad, NÃO re-chama GetEnv) →
+`ldr x8,[x0]`(=*env)=**0x1** → `ldr x8,[x8,#152]`→ fault 0x99. Ou o env cacheado (TLS/global SDL) está
+errado, OU jni_env_ptr (0x...d08, global loader) foi sobrescrito p/ 0x1 entre JNI_OnLoad e SDL_main
+(SDL tem ptr p/ ele via env=&jni_env_ptr). PROX: (a) print jni_env_ptr antes/depois de SDL_main p/ ver
+se corrompe; (b) como SDL3 Android_JNI_GetEnv cacheia o env (pthread TLS? checar pthread_*specific_fake);
+(c) prover storage path sem JNI (stub SDL_GetAndroidInternalStoragePath via hook) — é o save dir.
+Depois: F2 janela (ANativeWindow→Mali EGL real), F3 assets (AAsset→fopen data1 1.46GB). DUSK_NOSKIP=1
+mostra crash real. Device /storage/roms/dusklight-recon/ (libmain.so+dusklight; data1 ainda não).
