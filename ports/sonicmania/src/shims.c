@@ -37,7 +37,9 @@ void __cxa_guard_release(uint64_t *g) { *(volatile uint8_t *)g = 1; }
 void __cxa_guard_abort(uint64_t *g) { (void)g; }
 void *__cxa_allocate_exception(unsigned long n) { return malloc(n ? n : 1); }
 void __cxa_free_exception(void *p) { free(p); }
-void __cxa_throw(void *e, void *t, void *d) { (void)e; (void)t; (void)d; fprintf(stderr, "[shim] __cxa_throw -> abort\n"); abort(); }
+void __cxa_throw(void *e, void *t, void *d) { (void)e; (void)d;
+  const char *tn = "?"; if (t) { const char *n = *(const char **)((char *)t + 8); if (n) tn = n; }
+  fprintf(stderr, "[shim] __cxa_throw type=%s -> abort\n", tn); abort(); }
 void *__cxa_begin_catch(void *e) { return e; }
 void __cxa_end_catch(void) {}
 void __cxa_pure_virtual(void) { fprintf(stderr, "[shim] pure_virtual -> abort\n"); abort(); }

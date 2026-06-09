@@ -116,6 +116,28 @@ static void audio_cb(void *ud, Uint8 *stream, int len) {
   else memset(stream, 0, len);
 }
 
+static void (*g_onkey)(void *, void *, int, int) = NULL;
+static int sdl_key_to_android(int sc) {
+  switch (sc) {
+    case SDL_SCANCODE_UP: return 19; case SDL_SCANCODE_DOWN: return 20;
+    case SDL_SCANCODE_LEFT: return 21; case SDL_SCANCODE_RIGHT: return 22;
+    case SDL_SCANCODE_RETURN: return 108; case SDL_SCANCODE_ESCAPE: return 109;
+    case SDL_SCANCODE_Z: case SDL_SCANCODE_SPACE: return 96;
+    case SDL_SCANCODE_X: return 97; case SDL_SCANCODE_C: return 99; case SDL_SCANCODE_V: return 100;
+    default: return 0;
+  }
+}
+static int sdl_btn_to_android(int b) {
+  switch (b) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP: return 19; case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return 20;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return 21; case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return 22;
+    case SDL_CONTROLLER_BUTTON_A: return 96; case SDL_CONTROLLER_BUTTON_B: return 97;
+    case SDL_CONTROLLER_BUTTON_X: return 99; case SDL_CONTROLLER_BUTTON_Y: return 100;
+    case SDL_CONTROLLER_BUTTON_START: return 108; case SDL_CONTROLLER_BUTTON_BACK: return 109;
+    default: return 0;
+  }
+}
+
 void jni_run(void) {
   /* contexto GLES2 (no Android o Java cria; aqui criamos via SDL2->Mali fbdev) */
   SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO);
@@ -180,14 +202,28 @@ void jni_run(void) {
   { uintptr_t sa=so_find_addr_safe("_ZN4RSDK5Audio15deviceAvailableE"); uintptr_t si=so_find_addr_safe("_ZN4RSDK5Audio11initializedE");
     if(sa){ fprintf(stderr,"[audio] deviceAvailable era %d -> 1\n", *(int*)sa); *(int*)sa=1; }
     if(si){ fprintf(stderr,"[audio] initialized era %d -> 1\n", *(int*)si); *(int*)si=1; } }
+  g_onkey = (void (*)(void *, void *, int, int))so_find_addr_safe("Java_com_netflix_NGP_SonicMania_MainActivity_OnKeyEvent");
+  fprintf(stderr, "[input] OnKeyEvent=%p\n", (void *)g_onkey);
+  { int nj = SDL_NumJoysticks(); for (int i=0;i<nj;i++) if (SDL_IsGameController(i)) SDL_GameControllerOpen(i); }
   fprintf(stderr, "[drv] entrando no loop step\n");
   for (long f = 0; st; f++) {
     SDL_Event ev;
-    while (SDL_PollEvent(&ev))
+    while (SDL_PollEvent(&ev)) {
       if (ev.type == SDL_QUIT) return;
+      else if (ev.type == SDL_KEYDOWN || ev.type == SDL_KEYUP) {
+        int kc = sdl_key_to_android(ev.key.keysym.scancode);
+        if (kc && g_onkey) g_onkey(fake_env, fake_thiz, kc, ev.type == SDL_KEYDOWN ? 1 : 0);
+      } else if (ev.type == SDL_CONTROLLERBUTTONDOWN || ev.type == SDL_CONTROLLERBUTTONUP) {
+        int kc = sdl_btn_to_android(ev.cbutton.button);
+        if (kc && g_onkey) g_onkey(fake_env, fake_thiz, kc, ev.type == SDL_CONTROLLERBUTTONDOWN ? 1 : 0);
+      } else if (ev.type == SDL_CONTROLLERDEVICEADDED) SDL_GameControllerOpen(ev.cdevice.which);
+    }
+    /* auto-teste: aperta START no frame 250/255 p/ ver se a cena avança */
+    if (g_onkey && (f==700||f==1000||f==1300)) { fprintf(stderr, "[input] AUTO START f=%ld\n", f); g_onkey(fake_env, fake_thiz, 108, 1); }
+    if (g_onkey && (f==706||f==1006||f==1306)) { g_onkey(fake_env, fake_thiz, 108, 0); }
     { static uintptr_t sa2=0; if(!sa2) sa2=so_find_addr_safe("_ZN4RSDK5Audio15deviceAvailableE"); if(sa2)*(int*)sa2=1; }
     ((void (*)(void *, void *, float))st)(fake_env, fake_thiz, 60.0f);
-    { extern void opensles_shim_pump_callbacks(void); opensles_shim_pump_callbacks(); }
+    /* { extern void opensles_shim_pump_callbacks(void); opensles_shim_pump_callbacks(); } DISABLED p/ isolar crash */
     { extern int g_drawcount; static int last=0;
       if (f%30==0) { fprintf(stderr, "[loop] frame %ld draws=%d (+%d) glErr=0x%x\n", f, g_drawcount, g_drawcount-last, glGetError()); last=g_drawcount; }
       if (f%120==1) fprintf(stderr, "[state] running=%d container=%d info=%d %d %d %d\n",
