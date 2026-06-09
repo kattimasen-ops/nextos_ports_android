@@ -216,3 +216,33 @@ c91074); achar o loop de criacao de workers e seu gate (worker_count / flag). OU
 de execucao INLINE dos jobs quando worker_count=0. Ferramentas: gdb device (info threads/bt/x $sp),
 mapear offsets por base do so-loader (libunity=2a regiao r-xp anon, libmono=1a). Gates: RE4_SKIPJOBWAIT,
 RE4_HOOKEXC, RE4_NOSIGH, RE4_SUPPRESS_RAISE. Build: ports/re4/build_re4boot.sh. Device run.sh/fastrun.sh.
+
+## FASE 2d (2026-06-09 sessao 7) -- ENGINE+GLES INTEIRO DE PE, muro=GL contexto multi-thread
+SALTO MONSTRO: de "runtime travado no WaitForJobGroup" -> engine completa + GfxDevice GLES
+inicializando (config aceito, contexto GL, extensoes Mali lidas, pool de workers criado).
+Cadeia (rodar com **RE4_NOSIGH=1** + 2 cores; SEM SKIPJOBWAIT):
+1. **Job system**: reportar 2 CPUs (/proc/cpuinfo 2x + /sys/.../possible|present|online=0-1 +
+   sysconf NPROC=2) -> Unity cria 1 worker que processa os jobs do WaitForJobGroup (1 core=0
+   workers=deadlock; o Event::Wait nao faz work-steal inline).
+2. **NOSIGH**: o handler de SIGSEGV do Unity crasha no contexto de sinal bionic/glibc; bloquear
+   o install (my_sigaction p/ sig 4/5/6/7/8/11) deixa nosso on_segv e evita o crash do handler.
+3. **EGL config aceito** (a parede dura da GfxDevice): Unity 2018 valida config via eglCreateContext
+   por config + MATCH EXATO de cor. Achado via gdb (break *(g_unity_base+0x50301c), dump [r4+16..44]):
+   pede (LUM,ALPHA,BLUE,GREEN)=(8,8,8,8). Fix: eglChooseConfig retorna 6 configs (cores variadas,
+   ptr=0xC0F00+idx) + GetConfigAttrib por-config; idx0 RGBA8888 + **LUMINANCE=8** + 0x30e2=0x30e3
+   (sentinela) + RENDERABLE_TYPE/CONFORMANT=**ES2 only(4)** (Unity tenta ES3.2/3.1/3.0/ES2; so-ES2
+   faz rejeitar ES3 e usar ES2 -> Mali-450 e ES2-only; ES3 crashava).
+4. **dlopen libGLESv2.so.2 + libEGL.so.1 RTLD_GLOBAL** (gl*/egl* via dlsym) + my_dlsym devolve
+   egl_shim_* p/ nomes egl* (senao pega libEGL real do Mali no display falso).
+5. **jstring PERSISTENTE** (jni_shim): handle = ponteiro strdup, sem ring/free. O ring de 1024
+   liberava o path do PlayerPrefs (guardado pelo Unity) -> crash em vsnprintf("%s_tmp",path_liberado)
+   (strchrnul). Achado via gdb (r0->"%s_tmp" perto de ".v2.playerprefs"). + userdata dir re4-recon.
+6. hook_arm: mprotect RWX antes de hookar libunity (ja finalizada=r-x). __system_property_get zera value.
+
+**MURO FINAL (FASE 2e): GL contexto MULTI-THREAD no SDL-mali.** Unity (com 2 cores) faz GL numa
+render/worker thread (ex tid=ed2fe400); SDL_GL_MakeCurrent FALHA ("Unable to make EGL context current")
+porque o SDL-mali amarra a janela/surface EGL a thread que a criou (a main). SDL_GL_CreateContext na
+worker thread tb falha. Unity aborta (raise em unity+0x4fd5b8). Caminhos a explorar: (a) criar a janela
+SDL LAZY na thread de gfx (nao na main); (b) forcar Unity a fazer TODO o GL na main thread (1 core sem
+o job-deadlock, ou achar setting); (c) patch no SDL-mali fork p/ permitir contexto cross-thread.
+Gates: RE4_NOSIGH (necessario), RE4_SKIPJOBWAIT/RE4_QUIETLOG/RE4_HOOKEXC (diag). Build: build_re4boot.sh.

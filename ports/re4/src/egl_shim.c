@@ -226,6 +226,24 @@ EGLBoolean egl_shim_MakeCurrent(EGLDisplay dpy, EGLSurface draw,
     return EGL_TRUE;
 
   int ret = SDL_GL_MakeCurrent(egl_window, context->sdl_context);
+  if (ret != 0) {
+    /* falha tipica = contexto EGL preso a outra thread (EGL_BAD_ACCESS). Solta o contexto
+       atual desta thread e tenta de novo; persistindo, recria um contexto compartilhado
+       (share-root) nesta thread -- como todos compartilham, os objetos GL continuam validos. */
+    SDL_GL_MakeCurrent(egl_window, NULL);
+    ret = SDL_GL_MakeCurrent(egl_window, context->sdl_context);
+    if (ret != 0) {
+      pthread_mutex_lock(&egl_context_create_mutex);
+      SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
+      if (egl_share_root) SDL_GL_MakeCurrent(egl_window, egl_share_root);
+      SDL_GLContext nc = SDL_GL_CreateContext(egl_window);
+      SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
+      pthread_mutex_unlock(&egl_context_create_mutex);
+      if (nc) { context->sdl_context = nc; ret = SDL_GL_MakeCurrent(egl_window, nc);
+        debugPrintf("egl_shim: MakeCurrent recriou contexto p/ tid=%lx ret=%d [ctx_id=%d]\n",
+                    (unsigned long)pthread_self(), ret, context->id); }
+    }
+  }
   if (ret == 0) {
     has_real_gl = 1;
     static _Thread_local int acq_log = 0;
