@@ -202,6 +202,8 @@ void jni_run(void) {
   { uintptr_t sa=so_find_addr_safe("_ZN4RSDK5Audio15deviceAvailableE"); uintptr_t si=so_find_addr_safe("_ZN4RSDK5Audio11initializedE");
     if(sa){ fprintf(stderr,"[audio] deviceAvailable era %d -> 1\n", *(int*)sa); *(int*)sa=1; }
     if(si){ fprintf(stderr,"[audio] initialized era %d -> 1\n", *(int*)si); *(int*)si=1; } }
+  { uintptr_t ci = so_find_addr_safe("_ZN4RSDK3SKU18AndroidInputDevice10Controller4InitEv");
+    if (ci) { fprintf(stderr, "[input] Controller::Init()\n"); ((void(*)(void))ci)(); } }
   g_onkey = (void (*)(void *, void *, int, int))so_find_addr_safe("Java_com_netflix_NGP_SonicMania_MainActivity_OnKeyEvent");
   fprintf(stderr, "[input] OnKeyEvent=%p\n", (void *)g_onkey);
   { int nj = SDL_NumJoysticks(); for (int i=0;i<nj;i++) if (SDL_IsGameController(i)) SDL_GameControllerOpen(i); }
