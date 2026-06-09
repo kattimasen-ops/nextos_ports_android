@@ -178,3 +178,41 @@ ja toda preenchida (nao e ela). Provavel callback/ponteiro do runtime nao instal
 
 Infra de fix toda em main_re4.c (gated) + imports.gen.c (stat syscalls, ig_attr_getstack/getattr_np).
 strace no device = /usr/bin/strace (autoritativo, achou o fstat). assemblies em mono/1.0+2.0.
+
+## FASE 2b -- GC VENCIDO + runtime RODA 110s + muro = WaitForJobGroup (2026-06-09, sessao 6)
+SALTO GIGANTE: de crash instantaneo (pc=0) -> o runtime C# inicializa COMPLETO e roda 110s SEM
+CRASHAR (carrega mscorlib, sobe threads, abre globalgamemanagers/cena). Cadeia de fixes:
+
+1. **CRASH pc=0 ("NULL-call no init" de varias sessoes) RESOLVIDO -- causa-raiz:** `ig_getattr_np`
+   (imports.gen.c) fazia `memset(battr,0,64)` num buffer pthread_attr_t **BIONIC que tem so 24
+   bytes** (flags@0,base@4,size@8,guard@12,policy@16,prio@20). O memset de 64 ESTOURAVA o buffer
+   do caller (a rotina de stack-bounds do GC em mono_register_bundled_assemblies+0x1794) e ZERAVA
+   os regs salvos r4/fp/lr na pilha -> a funcao fazia `pop {r4,fp,pc}` com lr=0 -> **pc=0**. Os
+   regs do crash (r4=0,fp=0,pc=0) batiam exatamente com os 3 valores poppados. Fix: memset 24.
+   (idem sh_attr_init/sh_getattr_np que tinham memset 56.) Achado: gdb device + desmonte libmono.
+2. **OutOfMemoryException no init = FALSO ALARME 2x:** (a) sysconf BIONIC vs glibc -- libmono
+   chama sysconf(40=PAGESIZE bionic / 6 / 97 / 98), constantes que nao batem c/ glibc -> page
+   size lixo. Fix: traducao bionic->valor em my_sysconf. (b) os hooks mono_exception_from_name*
+   interceptavam a PRE-CRIACAO do singleton OutOfMemoryException (normal no init, [domain+28])
+   e matavam o processo -> gated em RE4_HOOKEXC. (c) hook errado em 0x2bcfdc era o INSTALADOR do
+   print-handler (instala 0x13dec0->mono_trace), nao um assert -> REMOVIDO.
+3. **ANativeWindow shims:** UnityMain travava em cond esperando o global de window (nativeRecreate
+   GfxState chama ANativeWindow_fromSurface e guarda; estava STUBADO=NULL). Fix: fromSurface
+   retorna !=NULL, getWidth/Height=1280x720, acquire/release/setBuffersGeometry no-op.
+4. **libz/inflate:** dlopen("libz.so.1",RTLD_GLOBAL) -> inflate resolve (descompressao de assets).
+
+**MURO ATUAL (FASE 2c): WaitForJobGroup -- libunity+0x3268e0 (Event::Wait[this+32]).**
+A UnityMain, no 1o nativeRender, cria um job group na pilha (builder em libunity+0xa8fexx, adiciona
+3 jobs: 32674c/326838/32687c) e espera num cond ate [group+32]!=0. Os jobs rodam em COMPUTE WORKER
+threads que o Unity **NAO cria** (so 3 threads: Mono finalizer + AsyncReadManager + BatchDeleteObjects
+-- estes 2 esperam em sem_wait@0x1567e4). Todas as threads em futex_wait = deadlock real (sem produtor).
+RE4_SKIPJOBWAIT=1 (hook 0x3268e0->return 0) faz a engine PROGREDIR mas CRASHA (pc em re4boot+0x15c5c)
+-> os jobs sao CRITICOS (produzem dados). Forcar 1 core (fake /proc/cpuinfo + /sys/.../possible +
+sysconf) NAO resolve o fence (Event::Wait[this+44]=callback de inline-exec e NULL -> cond_wait puro).
+
+PROXIMO (FASE 2c): (a) descobrir por que o Unity nao cria os compute job workers -- Thread::Create
+generico = libunity+0xbf3040 (stack 2MB, detached); 4 sites de pthread_create (5699a8/b97f4c/bf30a4/
+c91074); achar o loop de criacao de workers e seu gate (worker_count / flag). OU (b) achar o caminho
+de execucao INLINE dos jobs quando worker_count=0. Ferramentas: gdb device (info threads/bt/x $sp),
+mapear offsets por base do so-loader (libunity=2a regiao r-xp anon, libmono=1a). Gates: RE4_SKIPJOBWAIT,
+RE4_HOOKEXC, RE4_NOSIGH, RE4_SUPPRESS_RAISE. Build: ports/re4/build_re4boot.sh. Device run.sh/fastrun.sh.
