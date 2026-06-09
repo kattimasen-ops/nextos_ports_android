@@ -18,6 +18,7 @@
 #include "so_util.h"
 #include "imports.h"
 #include "jni_shim.h"
+#include "opensles_shim.h"
 /* RAIZ do "invalid CIL": glibc fstatat64 preenche struct stat64 layout GLIBC, mas Unity
    (bionic) le st_size no offset BIONIC -> tamanho errado (32KB) -> le so 32KB do .dll.
    Fix: syscall CRU -> o kernel preenche o layout stat64 do kernel (== bionic). */
@@ -48,7 +49,15 @@ static int my_fflush(FILE*fp){ return fflush(fp?sf_map(fp):NULL); }
 /* loga dlopen/dlsym -> ve se a engine tenta carregar libmono (Mono runtime C#) */
 static so_module *g_m_mono=NULL; static so_module *g_m_unity=NULL;
 static char g_dl_self; /* sentinela do handle global/self */
+/* AUDIO (FMOD do Unity): faz dlopen("libOpenSLES.so")+dlsym -> roteamos p/ o opensles_shim
+   (OpenSL ES -> SDL2). Sem isso "FMOD failed to initialize the output device". (padrao do sonicmania) */
+static char g_dl_sl; /* sentinela do handle de libOpenSLES */
+SLresult slCreateEngine_shim(void **e,SLuint32 no,const void*eo,SLuint32 ni,const SLInterfaceID*ii,const SLBoolean*ir);
+void opensles_shim_pump_callbacks(void);
+extern const SLInterfaceID sl_IID_ENGINE, sl_IID_PLAY, sl_IID_VOLUME, sl_IID_BUFFERQUEUE,
+  sl_IID_EFFECTSEND, sl_IID_ENGINECAPABILITIES, sl_IID_ENVIRONMENTALREVERB;
 static void *my_dlopen(const char *nm,int flag){
+  if(nm && strstr(nm,"OpenSLES")){ fprintf(stderr,"[DLOPEN] \"%s\" -> opensles_shim\n",nm); return &g_dl_sl; }
   if(!nm||!nm[0]||strstr(nm,"libc")||strstr(nm,"libunity")||strstr(nm,"libmain")||strstr(nm,"libmono")){
     fprintf(stderr,"[DLOPEN] \"%s\" -> SELF\n",nm?nm:"(null)"); return &g_dl_self; }
   void *h=dlopen(nm,flag); fprintf(stderr,"[DLOPEN] \"%s\" -> %p\n",nm,h); return h?h:&g_dl_self; }
@@ -90,6 +99,17 @@ static void *my_dlsym(void *h,const char *nm){ void *p=0;
   /* libmono pega pthread_kill/raise/abort via dlsym(RTLD_DEFAULT), furando o GOT override.
      Devolve nossos hooks aqui tb -> caimos no map_caller (acha quem dispara o raise fatal). */
   if(nm){ if(!strcmp(nm,"pthread_kill"))return (void*)my_ptkill; if(!strcmp(nm,"raise")||!strcmp(nm,"gsignal"))return (void*)my_raise; if(!strcmp(nm,"abort"))return (void*)my_abort; }
+  /* AUDIO: dlsym do handle de libOpenSLES -> opensles_shim (slCreateEngine + SL_IID_*) */
+  if(h==&g_dl_sl && nm){
+    if(!strcmp(nm,"slCreateEngine")) return (void*)slCreateEngine_shim;
+    if(!strcmp(nm,"SL_IID_ENGINE")) return (void*)&sl_IID_ENGINE;
+    if(!strcmp(nm,"SL_IID_PLAY")) return (void*)&sl_IID_PLAY;
+    if(!strcmp(nm,"SL_IID_VOLUME")) return (void*)&sl_IID_VOLUME;
+    if(!strcmp(nm,"SL_IID_BUFFERQUEUE")||!strcmp(nm,"SL_IID_ANDROIDSIMPLEBUFFERQUEUE")) return (void*)&sl_IID_BUFFERQUEUE;
+    if(!strcmp(nm,"SL_IID_EFFECTSEND")) return (void*)&sl_IID_EFFECTSEND;
+    if(!strcmp(nm,"SL_IID_ENGINECAPABILITIES")) return (void*)&sl_IID_ENGINECAPABILITIES;
+    if(!strcmp(nm,"SL_IID_ENVIRONMENTALREVERB")) return (void*)&sl_IID_ENVIRONMENTALREVERB;
+    fprintf(stderr,"[SL] dlsym %s -> NULL\n",nm); return NULL; }
   /* glGetString SEMPRE wrapado: cache/fallback evita NULL na worker sem contexto (crash do preproc) */
   if(nm && !strcmp(nm,"glGetString")) return (void*)my_glGetString;
   /* DIAG (gated): shader source/compile */
@@ -460,7 +480,7 @@ int main(void){
   fprintf(stderr,"[B] JNI_OnLoad=0x%x\n",ver);
   static long t=0xA1, surf=0x5F, ctx=0xC0;
   /* janela GLES2 do device (egl_shim do core, provado) */
-  if(SDL_Init(SDL_INIT_VIDEO)!=0) fprintf(stderr,"SDL_Init: %s\n",SDL_GetError());
+  if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_AUDIO)!=0) fprintf(stderr,"SDL_Init: %s\n",SDL_GetError());
   egl_shim_create_window();
   fprintf(stderr,"[C] janela SDL/GLES2 criada\n");
   void *fn;
@@ -485,6 +505,7 @@ int main(void){
   void *render=N("nativeRender");
   for(int f=0; render && f<1200; f++){
     ((unsigned char(*)(void*,void*))render)(env,&t);
+    opensles_shim_pump_callbacks(); /* alimenta o audio (OpenSL->SDL2) */
     if(f<5||f%100==0) fprintf(stderr,"[render %d]\n",f);
   }
   fprintf(stderr,"=== render loop terminou ===\n");
