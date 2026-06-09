@@ -59,15 +59,23 @@ static void hook_exc_name(void *img,const char *ns,const char *name){ (void)img;
   fprintf(stderr,"\n*** [MONO-EXC-N] %s.%s ***\n",ns?ns:"?",name?name:"?"); fflush(stderr); _exit(42); }
 /* loga mmap/mprotect EXEC + falhas -> ve a alocacao de exec-mem do JIT que da NULL */
 static void *my_mmap(void *a,size_t l,int prot,int flags,int fd,long off){
-  if(l>1024UL*1024*1024){ fprintf(stderr,"[MMAP-BIG] %zu + NORESERVE\n",l); flags|=0x4000; a=0; } /* MAP_NORESERVE: nao reserva, commit sob demanda */
+  if(l>1024UL*1024*1024){ fprintf(stderr,"[MMAP-BIG] %zu valloc=%p GC-caller=%p\n",l,__builtin_return_address(0),__builtin_return_address(1)); }
   void *p=mmap(a,l,prot,flags,fd,off);
-  if((prot&PROT_EXEC)||p==MAP_FAILED){ static int n=0; if(n++<60) fprintf(stderr,"[MMAP] len=%zu prot=0x%x flags=0x%x -> %p\n",l,prot,flags,p==MAP_FAILED?(void*)-1:p); } return p; }
+  if((prot&PROT_EXEC)||p==MAP_FAILED){ static int n=0; if(n++<60) fprintf(stderr,"[MMAP] len=%zu prot=0x%x -> %p\n",l,prot,p==MAP_FAILED?(void*)-1:p); } return p; }
 static int my_mprotect(void *a,size_t l,int prot){ int r=mprotect(a,l,prot);
   if(prot&PROT_EXEC){ static int n=0; if(n++<60) fprintf(stderr,"[MPROT-X] %p len=%zu prot=0x%x -> %d(%s)\n",a,l,prot,r,r?strerror(errno):"ok"); } return r; }
 /* sysconf(_SC_PHYS_PAGES)=0 no so-loader -> Mono faz 0-used=negativo=3.8GB. Damos 512MB. */
 static long my_sysconf(int name){ long r=sysconf(name);
   if((name==_SC_PHYS_PAGES||name==_SC_AVPHYS_PAGES) && r<=0){ long ps=sysconf(_SC_PAGESIZE); if(ps<=0)ps=4096;
     r=(512L*1024*1024)/ps; fprintf(stderr,"[SYSCONF] name=%d 0->%ld (512MB)\n",name,r); } return r; }
+/* BUG ACHADO: mono_pagesize() retorna 3.8GB (lixo) em vez de 4096 -> sgen pede mmap gigante.
+   Forco 4096 (valor correto) -> conserta TODOS os tamanhos/alinhamentos do Mono. */
+static int my_mono_pagesize(void){ return 4096; }
+/* valloc clamp como rede de seguranca (caso algum tamanho absurdo escape) */
+static void *my_mono_valloc(void *addr,size_t size,int flags,int type){ (void)type;(void)addr;
+  if(size>256UL*1024*1024){ fprintf(stderr,"[VALLOC-CLAMP] %zu -> 256MB\n",size); size=256UL*1024*1024; }
+  int prot=0; if(flags&1)prot|=PROT_READ; if(flags&2)prot|=PROT_WRITE; if(flags&4)prot|=PROT_EXEC;
+  void *p=mmap(0,size,prot?prot:PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0); return p==MAP_FAILED?0:p; }
 extern void *text_virtbase;
 extern void re4_fill(void);
 extern void recon_wire_pthread(void (*)(const char *, void *));
@@ -102,7 +110,8 @@ static int my_alog_print(int prio,const char*tag,const char*fmt,...){ va_list ap
 static int my_alog_write(int prio,const char*tag,const char*msg){ fprintf(stderr,"[ALOG:%d %s] %s\n",prio,tag?tag:"?",msg?msg:""); return 0; }
 static int my_alog_vprint(int prio,const char*tag,const char*fmt,va_list ap){ fprintf(stderr,"[ALOG:%d %s] ",prio,tag?tag:"?"); vfprintf(stderr,fmt,ap); fprintf(stderr,"\n"); return 0; }
 /* bloqueia o engine de instalar handler de crash p/ SIGSEGV/ABRT/etc -> MEU handler pega o crash REAL */
-static int my_sigaction(int sig,const void*act,void*old){ (void)old;
+static int my_sigaction(int sig,const void*act,void*old){
+  if(getenv("RE4_NOSIGH")&&(sig==11||sig==6)){ return 0; } /* debug: deixa o segv original chegar no gdb */ (void)old;
   if(!act) return sigaction(sig,NULL,NULL);
   void *h=*(void* const*)act; /* sa_handler/sa_sigaction @ offset 0 (bionic==glibc) */
   struct sigaction g; memset(&g,0,sizeof g);
@@ -178,7 +187,9 @@ int main(void){
     if(mh!=MAP_FAILED && so_load("libmono.so",mh,msz)>=0){ so_relocate(); so_resolve(dynlib_functions,dynlib_numfunctions,0);
       { uintptr_t a; a=so_find_addr_safe("mono_exception_from_name_msg"); if(a)hook_arm64(a,(uintptr_t)hook_exc_msg);
         a=so_find_addr_safe("mono_exception_from_name_two_strings"); if(a)hook_arm64(a,(uintptr_t)hook_exc_two);
-        a=so_find_addr_safe("mono_exception_from_name"); if(a)hook_arm64(a,(uintptr_t)hook_exc_name); so_flush_caches(); }
+        a=so_find_addr_safe("mono_exception_from_name"); if(a)hook_arm64(a,(uintptr_t)hook_exc_name);
+        a=so_find_addr_safe("mono_valloc"); if(a)hook_arm64(a,(uintptr_t)my_mono_valloc);
+        a=so_find_addr_safe("mono_pagesize"); if(a){hook_arm64(a,(uintptr_t)my_mono_pagesize); fprintf(stderr,"[HOOK] mono_pagesize -> 4096\n");} so_flush_caches(); }
       so_finalize(); so_execute_init_array(); g_m_mono=so_save(); fprintf(stderr,"[MONO] libmono carregado+init OK\n"); }
     else fprintf(stderr,"[MONO] FALHOU carregar libmono\n"); }
   so_use(g_m_unity);
