@@ -63,21 +63,15 @@ static struct {
 } g_jstrings[MAX_JSTRINGS];
 static int g_jstring_count = 0;
 
+/* jstring = o proprio ponteiro strdup (PERSISTENTE, unico, nunca liberado). O ring-buffer
+   antigo (free + reuse de 1024 slots) LIBERAVA strings ainda em uso (ex: o path do PlayerPrefs
+   guardado pelo Unity) -> apos >1024 jstrings, Unity usava ponteiro liberado -> crash em
+   strchrnul/vsnprintf("%s_tmp", path_liberado). Identidade resolve isso (vaza, mas sessao limitada). */
 static void *make_jstring(const char *value) {
-  static char jstring_storage[MAX_JSTRINGS];
-  int idx = g_jstring_count++ % MAX_JSTRINGS;
-  if (g_jstrings[idx].value) free(g_jstrings[idx].value);
-  g_jstrings[idx].handle = &jstring_storage[idx];
-  g_jstrings[idx].value = strdup(value ? value : "");
-  return g_jstrings[idx].handle;
+  return (void *)strdup(value ? value : "");
 }
-
 static const char *resolve_jstring(void *jstr) {
-  for (int i = 0; i < MAX_JSTRINGS; i++) {
-    if (g_jstrings[i].handle == jstr && g_jstrings[i].value)
-      return g_jstrings[i].value;
-  }
-  return "";
+  return jstr ? (const char *)jstr : "";
 }
 
 /* ---- Registry de method/field IDs por NOME (recon Unity) ---- */
@@ -306,7 +300,7 @@ static void *jni_CallObjectMethodV(void *env, void *obj, void *methodID,
         strcmp(nm, "getDataDir") == 0 || strcmp(nm, "getExternalStorageDirectory") == 0 ||
         strcmp(nm, "getPath") == 0 || strcmp(nm, "getAbsolutePath") == 0 ||
         strcmp(nm, "getCanonicalPath") == 0)
-      return make_jstring("/storage/roms/hollow-recon/userdata");
+      return make_jstring("/storage/roms/re4-recon/userdata");
     /* SharedPreferences.getString(key, default) -> loga a chave + retorna default */
     if (strcmp(nm, "getString") == 0) {
       void *keystr = va_arg(ap, void *);
