@@ -340,6 +340,16 @@ void jni_run(void) {
         if (*(int*)(gp+0x414bc)!=200) *(int*)(gp+0x414bc)=200; /* optionsLoaded */
         if (*(int*)(gp+0x441778)!=200) *(int*)(gp+0x441778)=200; /* replayTableLoaded */
         if (*(int*)(gp+0x441780)!=200) *(int*)(gp+0x441780)=200; /* taTableLoaded */ }
+      /* Forçar selectionDisabled=false (offset +228) nos UIControls do menu: o force
+       * de initializedAPI pulou o `mainMenu->selectionDisabled=false`, deixando o menu
+       * sem processar input (isProcessingInput=0). Varre entidades; nas que parecem
+       * UIControl (state @+96 aponta p/ .text) com selectionDisabled==1, zera. */
+      { static uintptr_t ge2=0; if(!ge2) ge2=so_find_addr_safe("_ZN4RSDK12ObjectSystem9GetEntityEt");
+        if (ge2) { uintptr_t tlo=tb, thi=tb+0x500000; /* text range aprox */
+          for (int s=0;s<160;s++){ uintptr_t e=((uintptr_t(*)(unsigned))ge2)(s); if(!e)continue;
+            uintptr_t st=*(uintptr_t*)(e+96);
+            if (st>=tlo && st<thi && *(int*)(e+228)==1) { *(int*)(e+228)=0;
+              static int once2=0; if(!once2){once2=1;fprintf(stderr,"[menufix] selectionDisabled->0 (slot %d)\n",s);} } } } }
       /* MenuSetup_PrerollChecks: se MenuSetup->initializedAPI(+16)!=0 retorna "done"
        * de cara, pulando TODOS os gates de API mobile (NotifyAutosave/Notifs/Dialogs).
        * MenuSetup = *(tb+0x4a7b20). So depois de initializedSaves(+20) setar. */
@@ -360,7 +370,9 @@ void jni_run(void) {
         static int mpress0=0,mpress1=0;
         if(ci){int*p=(int*)ci;for(int k=0;k<12;k++)if(p[k*3+1])mpress0=1;}
         if(g_ctrl_base){int*p=(int*)c1;for(int k=0;k<12;k++)if(p[k*3+1])mpress1=1;}
-        if(f%120==45){fprintf(stderr,"[menuin] ctrl0_press_seen=%d ctrl1_press_seen=%d\n",mpress0,mpress1);mpress0=mpress1=0;} }
+        if(f%120==45){ uintptr_t uic=*(uintptr_t*)(tb+0x4a7ae8);
+          fprintf(stderr,"[menuin] ctrl0_press=%d ctrl1_press=%d | UIControl proc=%d inputLocked=%d lockInput=%d\n",mpress0,mpress1,
+            uic?*(int*)(uic+4):-1, uic?*(int*)(uic+8):-1, uic?*(int*)(uic+12):-1);mpress0=mpress1=0;} }
       if (f%60==15) {
         uintptr_t pv=*(uintptr_t*)(tb+0x490e08); uintptr_t us=pv?*(uintptr_t*)pv:0;
         fprintf(stderr,"[menu] us=0x%lx auth=%d storage=%d perm=%d conflict=%d | saveLd=%d optLd=%d\n",
