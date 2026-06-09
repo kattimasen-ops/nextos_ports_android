@@ -30,10 +30,13 @@ static int my_fprintf(FILE*fp,const char*fmt,...){ if(fmt&&strstr(fmt,"GET_MEM")
 static int my_vfprintf(FILE*fp,const char*fmt,va_list ap){ if(fmt&&strstr(fmt,"GET_MEM"))getmem_trace("vfprintf"); return vfprintf(sf_map(fp),fmt,ap); }
 static void getmem_trace(const char*tag){
   volatile void *anchor; uintptr_t sp=(uintptr_t)&anchor;
-  fprintf(stderr,"[GETMEM-TRACE %s] frames libmono na pilha:\n",tag);
+  fprintf(stderr,"[GETMEM-TRACE %s] return-addrs validos (V-4==bl) libmono:\n",tag);
   int found=0;
-  for(int k=0;k<1024 && found<24;k++){ uintptr_t v=*(uintptr_t*)(sp+k*4);
-    if(g_mono_base&&v>=g_mono_base+0x10000&&v<g_mono_base+0x396c84){ fprintf(stderr,"  libmono+0x%lx\n",(unsigned long)(v-g_mono_base)); found++; } }
+  for(int k=0;k<2048 && found<20;k++){ uintptr_t v=*(uintptr_t*)(sp+k*4);
+    if(g_mono_base&&v>=g_mono_base+0x10000&&v<g_mono_base+0x396c84){
+      unsigned ins=*(unsigned*)(v-4); unsigned top=ins>>24;
+      if(top==0xeb||top==0xfa||top==0xfb){ /* bl/blx -> v e return addr real */
+        fprintf(stderr,"  libmono+0x%lx (call de +0x%lx)\n",(unsigned long)(v-g_mono_base),(unsigned long)((v-4)-g_mono_base)); found++; } } }
   fflush(stderr); }
 static int my_fputs(const char*str,FILE*fp){ if(str&&strstr(str,"GET_MEM"))getmem_trace("fputs"); return fputs(str,sf_map(fp)); }
 static size_t my_fwrite(const void*p,size_t a,size_t b,FILE*fp){ if(p&&a*b>=7&&memmem(p,a*b,"GET_MEM",7))getmem_trace("fwrite"); return fwrite(p,a,b,sf_map(fp)); }
@@ -100,6 +103,14 @@ static void* my_jit_tls_getter(void){
     else { fprintf(stderr,"[JITTLS] sem attach (d=%p jatt=%p)\n",d,(void*)g_jatt_fn); fflush(stderr); }
   }
   return g_orig_jitgetter?g_orig_jitgetter():0;
+}
+/* GET_MEM do Boehm (libmono+0x2bed14): aborta "Bad GET_MEM arg" se (bytes & (GC_page_size-1)).
+   Se GC_page_size==0 -> qualquer bytes aborta. Hook+trampolim: arredonda bytes p/ 4096. */
+static void* (*g_orig_getmem)(unsigned)=0;
+static void* my_getmem(unsigned bytes){
+  static int gn=0; unsigned orig=bytes; bytes=(bytes+4095u)&~4095u;
+  if(gn++<12){ fprintf(stderr,"[GETMEM] bytes=%u->%u (orig&0xfff=%u)\n",orig,bytes,orig&0xfff); fflush(stderr); }
+  return g_orig_getmem?g_orig_getmem(bytes):0;
 }
 /* handler de assert do Mono (libmono+0x2bcf90): r0=arquivo r1=linha. Loga e NAO aborta. */
 static void my_assert_handler(const char* file, int line, const char* a, const char* b){ (void)a;(void)b;
@@ -242,6 +253,10 @@ int main(void){
           if(tr!=MAP_FAILED){ memcpy(tr,(void*)gt,8); *(uint32_t*)(tr+8)=0xe51ff004u; *(uint32_t*)(tr+12)=(uint32_t)(gt+8);
             __builtin___clear_cache((char*)tr,(char*)tr+16); g_orig_jitgetter=(void*(*)(void))tr;
             hook_arm64(gt,(uintptr_t)my_jit_tls_getter); fprintf(stderr,"[HOOK] jit_tls getter @0x1a6a8 base=%p tramp=%p\n",(void*)base,(void*)tr); }
+          { uintptr_t gm=base+0x2bed14; unsigned char*t2=(unsigned char*)mmap(0,32,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+            if(t2!=MAP_FAILED){ memcpy(t2,(void*)gm,8); *(uint32_t*)(t2+8)=0xe51ff004u; *(uint32_t*)(t2+12)=(uint32_t)(gm+8);
+              __builtin___clear_cache((char*)t2,(char*)t2+16); g_orig_getmem=(void*(*)(unsigned))t2;
+              hook_arm64(gm,(uintptr_t)my_getmem); fprintf(stderr,"[HOOK] GET_MEM @0x2bed14\n"); } }
           hook_arm64(base+0x2bcfdc,(uintptr_t)my_assert_handler); fprintf(stderr,"[HOOK] assert handler @0x2bcfdc (g_log fatal, nao-fatal)\n"); }
         so_flush_caches(); }
       so_finalize(); so_execute_init_array(); g_m_mono=so_save(); fprintf(stderr,"[MONO] libmono carregado+init OK\n"); }
