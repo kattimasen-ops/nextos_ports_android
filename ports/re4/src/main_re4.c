@@ -199,6 +199,9 @@ static int my_open(const char*p,int fl,...){ if(p&&(strstr(p,"proc")||strstr(p,"
    e ESPERA num cond ate o global de window virar !=NULL. Estavam STUBADOS (retornavam NULL)
    -> Unity guardava NULL -> UnityMain travava p/ sempre. Retornamos window fake !=NULL + dims. */
 static int jobwait_stub(void*this_){ (void)this_; return 0; }
+/* __system_property_get(name,value): Unity le `value` como string. O stub_generic nao
+   null-terminava -> Unity lia lixo -> crash em strchrnul/strlen. Aqui zeramos value. */
+static int my_sysprop(const char*name,char*value){ (void)name; if(value)value[0]=0; return 0; }
 static int g_anw=0xA11;
 static void *my_aw_fromSurface(void*env,void*surf){ (void)env;(void)surf; fprintf(stderr,"[ANW] fromSurface -> %p\n",(void*)&g_anw); return &g_anw; }
 static int my_aw_setgeom(void*w,int wd,int ht,int f){ (void)w;(void)wd;(void)ht;(void)f; return 0; }
@@ -241,10 +244,11 @@ static void *sh_getspecific(pthread_key_t k){ if((int)k<=0||(int)k>=NSLOT){ stat
       else if(w>=ub&&w<ub+0x2000000){ fprintf(stderr,"   unity+0x%lx\n",w-ub); hits++; } } }} return v; }
 static int sh_setspecific(pthread_key_t k, const void *v){ if((int)k<=0||(int)k>=NSLOT) return 22; void**arr=tls_slots(); if(v){static int st=0; if(st++<2000)fprintf(stderr,"[TLS-SET] k=%d v=%p tid=%p arr=%p\n",(int)k,v,(void*)pthread_self(),(void*)arr);} arr[(int)k]=(void*)v; return 0; }
 /* __android_log REAL -> stderr (sem isso, o erro do engine antes do abort some) */
-static int my_alog_print(int prio,const char*tag,const char*fmt,...){ va_list ap; va_start(ap,fmt);
+/* RE4_QUIETLOG: no-op (testa se o crash em strchrnul/vfprintf vem do nosso __android_log) */
+static int my_alog_print(int prio,const char*tag,const char*fmt,...){ if(getenv("RE4_QUIETLOG"))return 0; va_list ap; va_start(ap,fmt);
   fprintf(stderr,"[ALOG:%d %s] ",prio,tag?tag:"?"); vfprintf(stderr,fmt,ap); fprintf(stderr,"\n"); va_end(ap); return 0; }
-static int my_alog_write(int prio,const char*tag,const char*msg){ fprintf(stderr,"[ALOG:%d %s] %s\n",prio,tag?tag:"?",msg?msg:""); return 0; }
-static int my_alog_vprint(int prio,const char*tag,const char*fmt,va_list ap){ fprintf(stderr,"[ALOG:%d %s] ",prio,tag?tag:"?"); vfprintf(stderr,fmt,ap); fprintf(stderr,"\n"); return 0; }
+static int my_alog_write(int prio,const char*tag,const char*msg){ if(getenv("RE4_QUIETLOG"))return 0; fprintf(stderr,"[ALOG:%d %s] %s\n",prio,tag?tag:"?",msg?msg:""); return 0; }
+static int my_alog_vprint(int prio,const char*tag,const char*fmt,va_list ap){ if(getenv("RE4_QUIETLOG"))return 0; fprintf(stderr,"[ALOG:%d %s] ",prio,tag?tag:"?"); vfprintf(stderr,fmt,ap); fprintf(stderr,"\n"); return 0; }
 /* bloqueia o engine de instalar handler de crash p/ SIGSEGV/ABRT/etc -> MEU handler pega o crash REAL */
 static int my_sigaction(int sig,const void*act,void*old){
   if(getenv("RE4_NOSIGH")&&(sig==4||sig==5||sig==6||sig==7||sig==8||sig==11)){ return 0; } /* debug: deixa o segv original chegar no gdb */ (void)old;
@@ -325,6 +329,7 @@ int main(void){
   re4_set_import("pthread_key_delete",(void*)sh_key_delete);
   re4_set_import("pthread_getspecific",(void*)sh_getspecific);
   re4_set_import("pthread_setspecific",(void*)sh_setspecific);
+  re4_set_import("__system_property_get",(void*)my_sysprop);
   re4_set_import("__android_log_print",(void*)my_alog_print);
   re4_set_import("__android_log_write",(void*)my_alog_write);
   re4_set_import("__android_log_vprint",(void*)my_alog_vprint);
