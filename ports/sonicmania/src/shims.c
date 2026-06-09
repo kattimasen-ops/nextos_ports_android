@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "shims.h"
+#include <dlfcn.h>
+#include "opensles_shim.h"
 
 /* ---- pthread bionic->glibc (tipos compativeis: passthrough) ---- */
 int pthread_create_fake(pthread_t *t, const void *attr, void *(*f)(void *), void *arg) {
@@ -104,3 +106,18 @@ char g_sF_stub[3][256];
 void *__sF = g_sF_stub;
 int AInputEvent_getDeviceId(void *e) { (void)e; return 0; }
 int AMotionEvent_getButtonState(void *e) { (void)e; return 0; }
+
+/* ---- Oboe dlopen("libOpenSLES.so") -> opensles_shim (SDL2 audio) ---- */
+#define SL_MAGIC ((void *)0x5151ABCDul)
+void *my_dlopen(const char *name, int flag) {
+  if (name && strstr(name, "OpenSLES")) { fprintf(stderr, "[sl] dlopen %s -> shim\n", name); return SL_MAGIC; }
+  return dlopen(name, flag);
+}
+void *my_dlsym(void *h, const char *name) {
+  if (h == SL_MAGIC) {
+    fprintf(stderr, "[sl] dlsym %s\n", name ? name : "?");
+    if (name && strcmp(name, "slCreateEngine") == 0) return (void *)slCreateEngine_shim;
+    return NULL;
+  }
+  return dlsym(h, name);
+}

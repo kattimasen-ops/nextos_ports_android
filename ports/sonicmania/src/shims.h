@@ -57,4 +57,6 @@ void my_glTexSubImage2D();
 void my_glShaderSource();
 void my_glUseProgram();
 void my_glVertexAttribPointer();
+void *my_dlopen(const char *, int);
+void *my_dlsym(void *, const char *);
 #endif

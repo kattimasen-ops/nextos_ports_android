@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include "so_util.h"
 #include "util.h" /* ret0 */
+#include "opensles_shim.h"
 #include <string.h>
 
 static char fake_env[0x1000];
@@ -107,9 +108,17 @@ static void build_env(void) {
 #undef SET
 }
 
+static void (*g_mixtobuf)(float *, unsigned int) = NULL;
+static void audio_cb(void *ud, Uint8 *stream, int len) {
+  (void)ud;
+  if (g_mixtobuf) { g_mixtobuf((float *)stream, (unsigned)(len / 4));
+    static int c=0; if(c++%50==0){ float *f=(float*)stream; int nz=0; for(int i=0;i<len/4;i++) if(f[i]>0.001f||f[i]<-0.001f) nz++; fprintf(stderr,"[audio] cb#%d nonzero=%d/%d\n",c,nz,len/4); } }
+  else memset(stream, 0, len);
+}
+
 void jni_run(void) {
   /* contexto GLES2 (no Android o Java cria; aqui criamos via SDL2->Mali fbdev) */
-  SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
+  SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -146,6 +155,10 @@ void jni_run(void) {
     fprintf(stderr, "[drv] startEngine NAO achado — abortando\n");
     return;
   }
+  { extern void *SL_IID_ENGINE_shim, *SL_IID_PLAY_shim, *SL_IID_BUFFERQUEUE_shim, *SL_IID_ANDROIDSIMPLEBUFFERQUEUE_shim;
+    SL_IID_ENGINE_shim = (void *)sl_IID_ENGINE; SL_IID_PLAY_shim = (void *)sl_IID_PLAY;
+    SL_IID_BUFFERQUEUE_shim = (void *)sl_IID_BUFFERQUEUE; SL_IID_ANDROIDSIMPLEBUFFERQUEUE_shim = (void *)sl_IID_BUFFERQUEUE;
+    fprintf(stderr, "[sl] SL_IID wired\n"); }
   fprintf(stderr, "[drv] chamando startEngine...\n");
   ((void (*)(void *, void *, int, int, void *, const char *, int, void *,
               int, int, int, int, int, int, int, int))se)(
@@ -154,6 +167,8 @@ void jni_run(void) {
   fprintf(stderr, "[drv] startEngine retornou\n");
   uintptr_t sgr = so_find_addr_safe("Java_com_netflix_NGP_SonicMania_MainActivity_setGameRunning");
   if (sgr) { fprintf(stderr, "[drv] setGameRunning(1)\n"); ((void(*)(void*,void*,int))sgr)(fake_env, fake_thiz, 1); }
+  uintptr_t spa = so_find_addr_safe("Java_com_netflix_NGP_SonicMania_MainActivity_setPauseAudio");
+  if (spa) { fprintf(stderr, "[drv] setPauseAudio(0)\n"); ((void(*)(void*,void*,int))spa)(fake_env, fake_thiz, 0); }
   uintptr_t s_run = so_find_addr_safe("_ZN4RSDK4Game7runningE");
   uintptr_t s_cont = so_find_addr_safe("_ZN4RSDK10FileStream16useRSDKContainerE");
   uintptr_t s_info = so_find_addr_safe("_ZN4RSDK4Game4infoE");
@@ -162,11 +177,15 @@ void jni_run(void) {
   uintptr_t s_sinfo = so_find_addr_safe("_ZN4RSDK5Stage4infoE");
   uintptr_t s_folder = so_find_addr_safe("_ZN4RSDK5Stage13currentFolderE");
   fprintf(stderr, "[state] syms run=%p cont=%p info=%p\n", (void*)s_run, (void*)s_cont, (void*)s_info);
+  { uintptr_t sa=so_find_addr_safe("_ZN4RSDK5Audio15deviceAvailableE"); uintptr_t si=so_find_addr_safe("_ZN4RSDK5Audio11initializedE");
+    if(sa){ fprintf(stderr,"[audio] deviceAvailable era %d -> 1\n", *(int*)sa); *(int*)sa=1; }
+    if(si){ fprintf(stderr,"[audio] initialized era %d -> 1\n", *(int*)si); *(int*)si=1; } }
   fprintf(stderr, "[drv] entrando no loop step\n");
   for (long f = 0; st; f++) {
     SDL_Event ev;
     while (SDL_PollEvent(&ev))
       if (ev.type == SDL_QUIT) return;
+    { static uintptr_t sa2=0; if(!sa2) sa2=so_find_addr_safe("_ZN4RSDK5Audio15deviceAvailableE"); if(sa2)*(int*)sa2=1; }
     ((void (*)(void *, void *, float))st)(fake_env, fake_thiz, 60.0f);
     { extern int g_drawcount; static int last=0;
       if (f%30==0) { fprintf(stderr, "[loop] frame %ld draws=%d (+%d) glErr=0x%x\n", f, g_drawcount, g_drawcount-last, glGetError()); last=g_drawcount; }

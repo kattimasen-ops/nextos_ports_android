@@ -96,8 +96,8 @@ DynLibFunction dynlib_functions[] = {
   {"__cxa_pure_virtual", (uintptr_t)&__cxa_pure_virtual},  // cxx
   {"__cxa_throw", (uintptr_t)&__cxa_throw},  // cxx
   // TODO {"dl_iterate_phdr", (uintptr_t)&stub_dl_iterate_phdr},  // <<< IMPLEMENTAR
-  // TODO {"dlopen", (uintptr_t)&stub_dlopen},  // <<< IMPLEMENTAR
-  // TODO {"dlsym", (uintptr_t)&stub_dlsym},  // <<< IMPLEMENTAR
+  {"dlopen", (uintptr_t)&my_dlopen},
+  {"dlsym", (uintptr_t)&my_dlsym},
   {"expf", (uintptr_t)&expf},  // pass
   {"fclose", (uintptr_t)&fclose},  // pass
   // TODO {"feof", (uintptr_t)&stub_feof},  // <<< IMPLEMENTAR

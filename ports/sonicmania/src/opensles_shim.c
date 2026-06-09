@@ -222,6 +222,7 @@ static uint32_t ring_read(AudioPlayer *p, void *data, uint32_t len) {
 static void sdl_audio_callback(void *userdata, Uint8 *stream, int len) {
   (void)userdata;
   memset(stream, 0, len);
+  { static int dbgc=0; if(dbgc++%80==0){ int act=0; for(int k=0;k<MAX_PLAYERS;k++) if(g_players[k].active && g_players[k].play_state==SL_PLAYSTATE_PLAYING) act++; fprintf(stderr,"[sl] sdl_cb len=%d active_players=%d\n", len, act); } }
 
   int16_t *out = (int16_t *)stream;
   int out_samples = len / (int)sizeof(int16_t);
@@ -464,7 +465,7 @@ static void ensure_audio_initialized(void) {
 
   debugPrintf("opensles_shim: SDL audio opened: %dHz %dch %d samples\n",
               have.freq, have.channels, have.samples);
-  SDL_PauseAudioDevice(g_audio_dev, 0);
+  fprintf(stderr,"[sl] SDL audio dev=%d (CreateAudioPlayer OK)\n", g_audio_dev); SDL_PauseAudioDevice(g_audio_dev, 0);
   g_audio_initialized = 1;
 }
 
