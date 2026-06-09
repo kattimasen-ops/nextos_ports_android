@@ -28,16 +28,7 @@ static FILE *sf_map(FILE *fp){ uintptr_t p=(uintptr_t)fp,b=(uintptr_t)g_sf;
   if(p>=b && p<b+sizeof(g_sf)){ int i=(int)((p-b)/84); return i<=0?stdin:(i==1?stdout:stderr); } return fp; }
 static int my_fprintf(FILE*fp,const char*fmt,...){ if(fmt&&strstr(fmt,"GET_MEM"))getmem_trace("fprintf"); va_list ap; va_start(ap,fmt); int r=vfprintf(sf_map(fp),fmt,ap); va_end(ap); return r; }
 static int my_vfprintf(FILE*fp,const char*fmt,va_list ap){ if(fmt&&strstr(fmt,"GET_MEM"))getmem_trace("vfprintf"); return vfprintf(sf_map(fp),fmt,ap); }
-static void getmem_trace(const char*tag){
-  volatile void *anchor; uintptr_t sp=(uintptr_t)&anchor;
-  fprintf(stderr,"[GETMEM-TRACE %s] return-addrs validos (V-4==bl) libmono:\n",tag);
-  int found=0;
-  for(int k=0;k<2048 && found<20;k++){ uintptr_t v=*(uintptr_t*)(sp+k*4);
-    if(g_mono_base&&v>=g_mono_base+0x10000&&v<g_mono_base+0x396c84){
-      unsigned ins=*(unsigned*)(v-4); unsigned top=ins>>24;
-      if(top==0xeb||top==0xfa||top==0xfb){ /* bl/blx -> v e return addr real */
-        fprintf(stderr,"  libmono+0x%lx (call de +0x%lx)\n",(unsigned long)(v-g_mono_base),(unsigned long)((v-4)-g_mono_base)); found++; } } }
-  fflush(stderr); }
+static void getmem_trace(const char*tag){ (void)tag; /* DESABILITADO: o scan estourava a pilha */ }
 static int my_fputs(const char*str,FILE*fp){ if(str&&strstr(str,"GET_MEM"))getmem_trace("fputs"); return fputs(str,sf_map(fp)); }
 static size_t my_fwrite(const void*p,size_t a,size_t b,FILE*fp){ if(p&&a*b>=7&&memmem(p,a*b,"GET_MEM",7))getmem_trace("fwrite"); return fwrite(p,a,b,sf_map(fp)); }
 static int my_fputc(int c,FILE*fp){ return fputc(c,sf_map(fp)); }
@@ -189,7 +180,7 @@ static void on_segv(int sig, siginfo_t *si, void *uc_){
     uc->uc_mcontext.arm_r0,uc->uc_mcontext.arm_r1,uc->uc_mcontext.arm_r2,uc->uc_mcontext.arm_r3,uc->uc_mcontext.arm_r4);
   unsigned long sp=uc->uc_mcontext.arm_sp;
   fprintf(stderr,"[BACKTRACE frames sp..+8k]\n");
-  for(int k=0;k<2048;k++){ unsigned long v=*(unsigned long*)(sp+k*4);
+  for(int k=0;k<256;k++){ unsigned long v=*(unsigned long*)(sp+k*4);
     if(v>=base && v<base+0x2000000) fprintf(stderr,"  unity+0x%lx\n",v-base);
     else if(g_mono_base && v>=g_mono_base && v<g_mono_base+0x600000) fprintf(stderr,"  libmono+0x%lx\n",v-g_mono_base); }
   _exit(139);
