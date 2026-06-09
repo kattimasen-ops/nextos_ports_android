@@ -95,11 +95,15 @@ void egl_shim_create_window(void) {
   r_getError     =dlsym(RTLD_DEFAULT,"eglGetError");
   r_createContext=dlsym(RTLD_DEFAULT,"eglCreateContext");
   r_chooseConfig =dlsym(RTLD_DEFAULT,"eglChooseConfig");
-  if(r_getCurDisplay&&r_getCurSurface&&r_getCurContext&&r_makeCurrent&&r_createContext&&r_chooseConfig){
+  unsigned (*r_querySurface)(void*,void*,int,int*)=dlsym(RTLD_DEFAULT,"eglQuerySurface");
+  if(r_getCurDisplay&&r_getCurSurface&&r_getCurContext&&r_makeCurrent&&r_createContext&&r_chooseConfig&&r_querySurface){
     g_real_dpy=r_getCurDisplay(); g_real_surf=r_getCurSurface(EGL_DRAW_ATTR); g_real_ctx=r_getCurContext();
-    /* pega um EGLConfig REAL p/ criar contextos compartilhados (1 por thread) */
-    int cfgattr[]={0x3040,0x0004 /*RENDERABLE_TYPE=ES2*/, 0x3033,0x0004 /*SURFACE_TYPE=WINDOW*/, 0x3038};
-    int n=0; r_chooseConfig(g_real_dpy, cfgattr, &g_real_cfg, 1, &n);
+    /* config EXATO da surface do SDL (via CONFIG_ID) -> os contextos compartilhados batem com a
+       surface (senao eglMakeCurrent = EGL_BAD_MATCH 0x3009). */
+    int cfgid=0, n=0; r_querySurface(g_real_dpy, g_real_surf, 0x3028 /*EGL_CONFIG_ID*/, &cfgid);
+    int cfgattr[]={0x3028 /*EGL_CONFIG_ID*/, cfgid, 0x3038 /*EGL_NONE*/};
+    r_chooseConfig(g_real_dpy, cfgattr, &g_real_cfg, 1, &n);
+    debugPrintf("egl_shim: surface CONFIG_ID=%d cfg=%p n=%d\n", cfgid, g_real_cfg, n);
     if(g_real_dpy&&g_real_surf&&g_real_ctx&&g_real_cfg&&n>0){ g_use_real_egl=1;
       debugPrintf("egl_shim: REAL EGL dpy=%p surf=%p ctx=%p cfg=%p (Bully-style, 1 ctx/thread)\n",
                   g_real_dpy,g_real_surf,g_real_ctx,g_real_cfg); }
@@ -218,8 +222,15 @@ EGLContext egl_shim_CreateContext(EGLDisplay dpy, EGLConfig config,
      a criacao do SDL context p/ o 1o MakeCurrent, na PROPRIA thread de render (sdl_context=NULL). */
   c->sdl_context = NULL;
   c->id = next_context_id++;
-  debugPrintf("egl_shim: eglCreateContext -> ctx_id=%d [tid=%lx] (lazy)\n",
-              c->id, (unsigned long)pthread_self());
+  /* cria um contexto EGL REAL compartilhado (com o share-root g_real_ctx). NAO o torna current
+     -> a thread que fizer MakeCurrent o ativa. Main e gfx-thread cada um seu contexto, compartilham. */
+  if (g_use_real_egl && r_createContext) {
+    int ctxattr[] = {0x3098 /*EGL_CONTEXT_CLIENT_VERSION*/, 2, 0x3038 /*EGL_NONE*/};
+    c->real_ctx = r_createContext(g_real_dpy, g_real_cfg, g_real_ctx /*share*/, ctxattr);
+    debugPrintf("egl_shim: eglCreateContext -> ctx_id=%d real=%p [tid=%lx]\n",
+                c->id, c->real_ctx, (unsigned long)pthread_self());
+    if (!c->real_ctx) c->real_ctx = g_real_ctx; /* fallback: usa o share-root */
+  }
   return (EGLContext)c;
 }
 
@@ -239,7 +250,8 @@ EGLBoolean egl_shim_MakeCurrent(EGLDisplay dpy, EGLSurface draw,
       current_context = NULL; has_real_gl = 0;
     } else {
       current_context = context; last_context = context;
-      r = r_makeCurrent(g_real_dpy, g_real_surf, g_real_surf, g_real_ctx);
+      void *rc = context->real_ctx ? context->real_ctx : g_real_ctx;
+      r = r_makeCurrent(g_real_dpy, g_real_surf, g_real_surf, rc);
       has_real_gl = (r != 0);
       static _Thread_local int lg=0;
       if (r == 0 && lg < 8) { debugPrintf("egl_shim: REAL eglMakeCurrent FALHOU [tid=%lx] err=0x%x\n",
