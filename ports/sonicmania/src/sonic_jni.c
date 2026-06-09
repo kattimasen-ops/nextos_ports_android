@@ -65,7 +65,11 @@ static void *j_CallObjectMethod(void *e, void *o, int id, ...) {
   return (void *)0x1;
 }
 static const char *j_GetStringUTFChars(void *e, void *str, void *isCopy) {
-  (void)e; if (isCopy) *(char *)isCopy = 0; return (const char *)str;
+  (void)e; if (isCopy) *(char *)isCopy = 0;
+  /* jstrings falsos do CallObject (0x1/0x100/0x200/0x1000+) NAO sao char* validos;
+   * GetCurrentNetflixProfileId faz strlen() no retorno -> crash. Devolve "" p/ eles. */
+  if ((uintptr_t)str < 0x100000) return "";
+  return (const char *)str;
 }
 static void *j_NewStringUTF(void *e, const char *s) { (void)e; return (void *)s; }
 static int j_GetEnv(void *vm, void **env, int v) { (void)vm; (void)v; *env = fake_env; return 0; }
@@ -294,6 +298,23 @@ void jni_run(void) {
             const char*nm="?"; if(stp==tb+0x31cafc)nm="FadeToScene"; else if(stp==tb+0x31cb2c)nm="FadeToVideo";
             fprintf(stderr,"[pb] SAIU de PressButton -> %s (0x%lx)\n",nm,(unsigned long)(stp-tb)); in_pb=0; }
         }
+      }
+    }
+    /* ---- FIX MenuSetup: o port offline nao tem save/options no storage -> os
+     * callbacks setam globals->saveLoaded/optionsLoaded = STATUS_ERROR(500) e a
+     * MenuSetup_InitAPI fica presa na tela preta com o spinner. Força ambos p/
+     * STATUS_OK(200) = save novo/vazio -> MenuSetup avança p/ o menu real.
+     * globals = *(text_base+0x4a76d8); saveLoaded@0x100a0; optionsLoaded@0x414bc ---- */
+    if (s_folder && memcmp((char*)s_folder,"Menu",5)==0) {
+      uintptr_t tb = (uintptr_t)g_copyslot - 0x17d9bc;
+      uintptr_t gp = *(uintptr_t*)(tb + 0x4a76d8);
+      if (gp) { if (*(int*)(gp+0x100a0)!=200) *(int*)(gp+0x100a0)=200;
+                if (*(int*)(gp+0x414bc)!=200) *(int*)(gp+0x414bc)=200; }
+      if (f%60==15) {
+        uintptr_t pv=*(uintptr_t*)(tb+0x490e08); uintptr_t us=pv?*(uintptr_t*)pv:0;
+        fprintf(stderr,"[menu] us=0x%lx auth=%d storage=%d perm=%d conflict=%d | saveLd=%d optLd=%d\n",
+          (unsigned long)us, us?*(int*)(us+64):-1, us?*(int*)(us+68):-1, us?*(int*)(us+72):-1, us?*(int*)(us+60):-1,
+          gp?*(int*)(gp+0x100a0):-1, gp?*(int*)(gp+0x414bc):-1);
       }
     }
     /* { extern void opensles_shim_pump_callbacks(void); opensles_shim_pump_callbacks(); } DISABLED p/ isolar crash */
