@@ -19,6 +19,7 @@
 #include "jni_shim.h"
 static uintptr_t g_mono_base=0, g_unity_base=0;
 static void getmem_trace(const char*tag);
+static long my_read(int fd,void*b,unsigned long n){ long r=read(fd,b,n); if(n>50000){ static int rn=0; if(rn++<20)fprintf(stderr,"[READ] fd=%d req=%lu -> %ld\n",fd,n,r); } return r; }
 static long my_write(int fd,const void*b,unsigned long n){ if(fd==2&&b&&n>0&&n<200){ static int wn=0; if(wn++<200){ char t[208]; unsigned k=n<200?n:199; memcpy(t,b,k); t[k]=0; for(unsigned i=0;i<k;i++) if(t[i]=='\n')t[i]=' '; fprintf(stderr,"[W] %s\n",t); } } return write(fd,b,n); }
 /* BRIDGE stdio bionic: __sF[3] (stdin/out/err) do bionic tem layout != glibc. Forneco um
    array marcador + intercepto fprintf/fputs/etc pra mapear &__sF[i] -> stream real do glibc.
@@ -66,14 +67,19 @@ static void hook_exc_name(void *img,const char *ns,const char *name){ (void)img;
 /* loga mmap/mprotect EXEC + falhas -> ve a alocacao de exec-mem do JIT que da NULL */
 static void *my_mmap(void *a,size_t l,int prot,int flags,int fd,long off){
   if(l>1024UL*1024*1024){ fprintf(stderr,"[MMAP-BIG] %zu valloc=%p GC-caller=%p\n",l,__builtin_return_address(0),__builtin_return_address(1)); }
-  void *p=mmap(a,l,prot,flags,fd,off);
-  /* FS exFAT/FAT do /storage/roms NAO suporta mmap de arquivo -> emula: anon RW + pread.
-     Sem isso o Mono nao mapeia os .dll -> "invalid CIL image". */
-  if(p==MAP_FAILED && fd>=0 && l>0){
+  /* FS exFAT/FAT do /storage/roms NAO suporta mmap de arquivo de verdade (mmap "passa" mas
+     devolve lixo). Pra QUALQUER mmap de arquivo private read-only, emulo: anon RW + pread.
+     Sem isso o Mono parseia lixo -> "invalid CIL image". */
+  if(fd>=0 && l>0 && !(flags&0x10/*MAP_FIXED*/) && (prot&PROT_READ) && !(prot&PROT_WRITE)){
     void *q=mmap(0,l,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     if(q!=MAP_FAILED){ ssize_t r=pread(fd,q,l,off);
-      static int e=0; if(e++<8) fprintf(stderr,"[MMAP-FILE-EMU] len=%zu fd=%d off=%ld read=%zd -> %p\n",l,fd,off,r,q);
-      return q; }
+      static int e=0; if(e++<12) fprintf(stderr,"[MMAP-FILE-EMU] len=%zu fd=%d off=%ld read=%zd -> %p\n",l,fd,off,r,q);
+      if(r>0) return q; munmap(q,l); }
+  }
+  void *p=mmap(a,l,prot,flags,fd,off);
+  if(p==MAP_FAILED && fd>=0 && l>0){
+    void *q=mmap(0,l,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    if(q!=MAP_FAILED){ ssize_t r=pread(fd,q,l,off); if(r>0) return q; munmap(q,l); }
   }
   if((prot&PROT_EXEC)||p==MAP_FAILED){ static int n=0; if(n++<60) fprintf(stderr,"[MMAP] len=%zu prot=0x%x fd=%d -> %p\n",l,prot,fd,p==MAP_FAILED?(void*)-1:p); } return p; }
 static int my_mprotect(void *a,size_t l,int prot){ int r=mprotect(a,l,prot);
@@ -225,6 +231,7 @@ int main(void){
   re4_set_import("fopen",(void*)my_fopen);
   re4_set_import("open",(void*)my_open);
   re4_set_import("write",(void*)my_write);
+  re4_set_import("read",(void*)my_read);
   re4_set_import("raise",(void*)my_raise);
   re4_set_import("pthread_kill",(void*)my_ptkill);
   re4_set_import("sigaction",(void*)my_sigaction);
