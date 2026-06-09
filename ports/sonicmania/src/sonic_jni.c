@@ -153,6 +153,10 @@ void jni_run(void) {
   fprintf(stderr, "[drv] startEngine retornou\n");
   uintptr_t sgr = so_find_addr_safe("Java_com_netflix_NGP_SonicMania_MainActivity_setGameRunning");
   if (sgr) { fprintf(stderr, "[drv] setGameRunning(1)\n"); ((void(*)(void*,void*,int))sgr)(fake_env, fake_thiz, 1); }
+  uintptr_t s_run = so_find_addr_safe("_ZN4RSDK4Game7runningE");
+  uintptr_t s_cont = so_find_addr_safe("_ZN4RSDK10FileStream16useRSDKContainerE");
+  uintptr_t s_info = so_find_addr_safe("_ZN4RSDK4Game4infoE");
+  fprintf(stderr, "[state] syms run=%p cont=%p info=%p\n", (void*)s_run, (void*)s_cont, (void*)s_info);
   fprintf(stderr, "[drv] entrando no loop step\n");
   for (long f = 0; st; f++) {
     SDL_Event ev;
@@ -160,7 +164,10 @@ void jni_run(void) {
       if (ev.type == SDL_QUIT) return;
     ((void (*)(void *, void *, float))st)(fake_env, fake_thiz, 60.0f);
     { extern int g_drawcount; static int last=0;
-      if (f%30==0) { fprintf(stderr, "[loop] frame %ld draws=%d (+%d) glErr=0x%x\n", f, g_drawcount, g_drawcount-last, glGetError()); last=g_drawcount; } }
+      if (f%30==0) { fprintf(stderr, "[loop] frame %ld draws=%d (+%d) glErr=0x%x\n", f, g_drawcount, g_drawcount-last, glGetError()); last=g_drawcount; }
+      if (f%120==1) fprintf(stderr, "[state] running=%d container=%d info=%d %d %d %d\n",
+          s_run?*(int*)s_run:-9, s_cont?*(unsigned char*)s_cont:255,
+          s_info?((int*)s_info)[0]:-9, s_info?((int*)s_info)[1]:-9, s_info?((int*)s_info)[2]:-9, s_info?((int*)s_info)[3]:-9); }
     SDL_GL_SwapWindow(g_win);
   }
 }
