@@ -129,3 +129,27 @@ PROXIMO PASSO PRECISO (frente nova focada): achar a fonte do underflow (memoria=
 query de memoria que da 0 (NAO e sysconf); OU patchar a reserva do GC no libmono p/ pedir um
 tamanho fixo sano (ex: 256MB) E usar esse tamanho consistentemente. Alternativa: investigar se o
 libmono tem build sgen com max-heap configuravel por env que REALMENTE limite a reserva.
+
+## FASE 1c -- Boehm GC e o handler turbinado (2026-06-09 madrugada, sessao 4)
+DESCOBERTAS:
+- O "crash mini.c:2215 / stack walk not installed" era o **crash-REPORTER** do Mono falhando,
+  NAO o crash real. O crash real e um SIGSEGV/ABORT no init do GC.
+- libmono usa **GC BOEHM** (GC_push_all_stack, GC_end_blocking, GC_unix_get_mem).
+- **RE4_NOSIGH=1** (my_sigaction bloqueia install de SIGSEGV/ABRT/ILL/TRAP do Mono) +
+  abort/raise/pthread_kill non-fatal + on_segv turbinado (pega sig 4/5/6/7/8/11 + mapeia
+  offsets libmono via g_mono_base) => backtrace REAL do crash.
+- Cadeia do crash: mono_jit_thread_attach(0x1a820) -> mono_jit_init(0xbd5d0) -> GC init ->
+  GC_push_all_stack/GC_end_blocking(0x2b-0x2c) -> "Bad GET_MEM arg" -> ABORT (tgkill cru SIGABRT).
+- FIX aplicado: bionic pthread_attr_t e **32-bit** (stack_base@4, stack_size@8), nao 64-bit
+  (8/16) -- corrigido em pthread_shim (getattr_np/getstack/setstacksize/create). [getattr_np
+  nao e chamado pelo Boehm, mas o fix e correto p/ ARM32.]
+
+PAREDE ATUAL: GC Boehm "Bad GET_MEM arg" (libmono+~0x2bXXXX) -> tamanho de bloco invalido/
+desalinhado no GC_unix_get_mem durante o init do GC. String em .rodata 0x3884c0 (vaddr==offset).
+Tentado s/ sucesso: GC_INITIAL/MAXIMUM_HEAP_SIZE, GC_DONT_GC, sysconf/sysinfo/getpagesize override,
+/proc/meminfo fake (engine nao le meminfo; le /sys/.../cpufreq). A memoria=0mb do Unity vem de
+fonte ainda nao identificada (nem sysconf/sysinfo/JNI/proc).
+
+PROXIMO: achar GC_unix_get_mem (xref a 0x3884c0 -- padrao movw/movt ou GOT, nao ldr+add) e
+hookar p/ alinhar/corrigir o size; OU descobrir a fonte do memory=0 que enviesa o GC.
+Infra de debug toda no main_re4 (on_segv multi-sinal + hooks). RE4_NOSIGH=1 chega mais longe.

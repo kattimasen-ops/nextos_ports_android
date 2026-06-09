@@ -112,7 +112,7 @@ static int sh_rwl_destroy(void *l) { (void)l; return 0; }
 static int sh_create(void *thr, const void *battr, void *(*fn)(void *), void *arg) {
   pthread_attr_t ga; pthread_attr_init(&ga);
   if (battr) {
-    size_t ss = *(const size_t *)((const unsigned char *)battr + 16);
+    size_t ss = *(const size_t *)((const unsigned char *)battr + 8);
     if (ss >= 32768 && ss <= (256UL << 20)) pthread_attr_setstacksize(&ga, ss);
   }
   fprintf(stderr,"[THREAD] sh_create fn=%p\n",fn); int r = pthread_create((pthread_t *)thr, &ga, fn, arg);
@@ -123,7 +123,7 @@ static int sh_create(void *thr, const void *battr, void *(*fn)(void *), void *ar
 static int sh_attr_init(void *a) { if (a) memset(a, 0, 56); return 0; }
 static int sh_attr_destroy(void *a) { (void)a; return 0; }
 static int sh_attr_setstacksize(void *a, size_t s) {
-  if (a) *(size_t *)((unsigned char *)a + 16) = s; return 0;
+  if (a) *(size_t *)((unsigned char *)a + 8) = s; return 0;  /* bionic 32-bit stack_size@8 */
 }
 static int sh_attr_setdetachstate(void *a, int s) {
   if (a) *(int *)((unsigned char *)a + 0) = s ? 1 : 0; return 0;
@@ -143,15 +143,17 @@ static int sh_getattr_np(void *thread_, void *battr) {
   pthread_attr_destroy(&ga);
   if (battr) {
     memset(battr, 0, 56);
-    *(void **)((char *)battr + 8) = base;
-    *(size_t *)((char *)battr + 16) = size;
+    /* bionic pthread_attr_t 32-bit (armeabi-v7a): flags@0, stack_base@4, stack_size@8 */
+    *(void **)((char *)battr + 4) = base;
+    *(size_t *)((char *)battr + 8) = size;
   }
+  fprintf(stderr, "[STACK] getattr_np base=%p size=%zu\n", base, size);
   return r;
 }
 static int sh_attr_getstack(void *battr, void **base, size_t *size) {
   if (battr) {
-    if (base) *base = *(void **)((char *)battr + 8);
-    if (size) *size = *(size_t *)((char *)battr + 16);
+    if (base) *base = *(void **)((char *)battr + 4);  /* bionic 32-bit stack_base@4 */
+    if (size) *size = *(size_t *)((char *)battr + 8);  /* stack_size@8 */
   }
   return 0;
 }

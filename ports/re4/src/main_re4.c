@@ -13,6 +13,7 @@
 #include <pwd.h>
 #include <errno.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include "so_util.h"
 #include "imports.h"
 #include "jni_shim.h"
@@ -95,6 +96,13 @@ static void my_assert_handler(const char* file, int line, const char* a, const c
   static int n=0; if(n++<60){ fprintf(stderr,"[ASSERT-SKIP] %s:%d\n", file?file:"?", line); fflush(stderr); }
 }
 static uintptr_t g_mono_base=0, g_unity_base=0;
+/* loga open/fopen -> acha a fonte de memoria (/proc/meminfo etc) */
+static FILE* my_fopen(const char*p,const char*m){ if(p&&(strstr(p,"proc")||strstr(p,"mem")||strstr(p,"sys"))) fprintf(stderr,"[FOPEN] %s\n",p);
+  if(p&&!strcmp(p,"/proc/meminfo")){ fprintf(stderr,"[FOPEN] meminfo -> fake 512MB\n");
+    FILE*t=tmpfile(); if(t){ fputs("MemTotal:      524288 kB\nMemFree:       262144 kB\nMemAvailable:  262144 kB\n",t); rewind(t); return t; } }
+  return fopen(p,m); }
+static int my_open(const char*p,int fl,...){ if(p&&(strstr(p,"proc")||strstr(p,"mem"))) fprintf(stderr,"[OPEN] %s\n",p);
+  va_list ap; va_start(ap,fl); int mo=va_arg(ap,int); va_end(ap); return open(p,fl,mo); }
 extern void *text_virtbase;
 extern void re4_fill(void);
 extern void recon_wire_pthread(void (*)(const char *, void *));
@@ -130,7 +138,7 @@ static int my_alog_write(int prio,const char*tag,const char*msg){ fprintf(stderr
 static int my_alog_vprint(int prio,const char*tag,const char*fmt,va_list ap){ fprintf(stderr,"[ALOG:%d %s] ",prio,tag?tag:"?"); vfprintf(stderr,fmt,ap); fprintf(stderr,"\n"); return 0; }
 /* bloqueia o engine de instalar handler de crash p/ SIGSEGV/ABRT/etc -> MEU handler pega o crash REAL */
 static int my_sigaction(int sig,const void*act,void*old){
-  if(getenv("RE4_NOSIGH")&&(sig==11||sig==6)){ return 0; } /* debug: deixa o segv original chegar no gdb */ (void)old;
+  if(getenv("RE4_NOSIGH")&&(sig==4||sig==5||sig==6||sig==7||sig==8||sig==11)){ return 0; } /* debug: deixa o segv original chegar no gdb */ (void)old;
   if(!act) return sigaction(sig,NULL,NULL);
   void *h=*(void* const*)act; /* sa_handler/sa_sigaction @ offset 0 (bionic==glibc) */
   struct sigaction g; memset(&g,0,sizeof g);
@@ -148,7 +156,9 @@ static void on_segv(int sig, siginfo_t *si, void *uc_){
   unsigned long base=(unsigned long)text_virtbase;
   fprintf(stderr,"\n[SEGV] fault=%p pc=0x%lx lr=0x%lx",si->si_addr,pc,lr);
   if(pc>=base && pc<base+0x2000000) fprintf(stderr," (unity+0x%lx)",pc-base);
-  fprintf(stderr," lr_off=0x%lx\n",lr-base);
+  if(g_mono_base && pc>=g_mono_base && pc<g_mono_base+0x600000) fprintf(stderr," (libmono+0x%lx)",pc-g_mono_base);
+  if(g_mono_base && lr>=g_mono_base && lr<g_mono_base+0x600000) fprintf(stderr," (lr=libmono+0x%lx)",lr-g_mono_base);
+  fprintf(stderr," sig=%d\n",sig);
   FILE *m=fopen("/proc/self/maps","r"); char ln[300];
   while(m && fgets(ln,sizeof ln,m)){ unsigned long a,b; if(sscanf(ln,"%lx-%lx",&a,&b)==2 && pc>=a && pc<b){ fprintf(stderr,"[SEGV-LIB] %s",ln); break; } }
   if(m) fclose(m);
@@ -156,13 +166,15 @@ static void on_segv(int sig, siginfo_t *si, void *uc_){
   fprintf(stderr,"[REGS] r0=0x%lx r1=0x%lx r2=0x%lx r3=0x%lx r4=0x%lx\n",
     uc->uc_mcontext.arm_r0,uc->uc_mcontext.arm_r1,uc->uc_mcontext.arm_r2,uc->uc_mcontext.arm_r3,uc->uc_mcontext.arm_r4);
   unsigned long sp=uc->uc_mcontext.arm_sp;
-  fprintf(stderr,"[BACKTRACE unity frames sp..+8k]\n");
+  fprintf(stderr,"[BACKTRACE frames sp..+8k]\n");
   for(int k=0;k<2048;k++){ unsigned long v=*(unsigned long*)(sp+k*4);
-    if(v>=base && v<base+0x2000000) fprintf(stderr,"  unity+0x%lx\n",v-base); }
+    if(v>=base && v<base+0x2000000) fprintf(stderr,"  unity+0x%lx\n",v-base);
+    else if(g_mono_base && v>=g_mono_base && v<g_mono_base+0x600000) fprintf(stderr,"  libmono+0x%lx\n",v-g_mono_base); }
   _exit(139);
 }
 int main(void){
-  struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=on_segv; sa.sa_flags=SA_SIGINFO; sigaction(SIGSEGV,&sa,0); sigaction(SIGBUS,&sa,0);
+  struct sigaction sa; memset(&sa,0,sizeof sa); sa.sa_sigaction=on_segv; sa.sa_flags=SA_SIGINFO;
+  sigaction(SIGSEGV,&sa,0); sigaction(SIGBUS,&sa,0); sigaction(SIGABRT,&sa,0); sigaction(SIGILL,&sa,0); sigaction(SIGTRAP,&sa,0); sigaction(SIGFPE,&sa,0);
   fprintf(stderr,"=== RE4 Unity 2018 (ARM32 GLES2) ===\n");
   size_t hs=48*1024*1024;
   void *heap=mmap(NULL,hs,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
@@ -178,6 +190,8 @@ int main(void){
   re4_set_import("__android_log_write",(void*)my_alog_write);
   re4_set_import("__android_log_vprint",(void*)my_alog_vprint);
   re4_set_import("abort",(void*)my_abort);
+  re4_set_import("fopen",(void*)my_fopen);
+  re4_set_import("open",(void*)my_open);
   re4_set_import("raise",(void*)my_raise);
   re4_set_import("pthread_kill",(void*)my_ptkill);
   re4_set_import("sigaction",(void*)my_sigaction);
