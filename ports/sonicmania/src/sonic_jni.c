@@ -269,9 +269,12 @@ void jni_run(void) {
      * Mania Mode->save->personagem->iniciar, sem precisar do controle do o autor. */
     if (g_onkey && getenv("SONIC_AUTONEW") && s_folder && memcmp((char*)s_folder,"Menu",5)==0) {
       static long mf=0; mf++;
-      long ph=mf%150;
-      if (ph==0 && mf<1200) { g_onkey(fake_env,fake_thiz,96,1); fprintf(stderr,"[autonew] A press (mf=%ld)\n",mf); }
-      else if (ph==6) g_onkey(fake_env,fake_thiz,96,0);
+      long ph=mf%120;
+      if (ph==0 && mf<1500) { g_onkey(fake_env,fake_thiz,108,1); g_onkey(fake_env,fake_thiz,96,1);
+        uintptr_t tb3=(uintptr_t)g_copyslot-0x17d9bc; uintptr_t ci=*(uintptr_t*)(tb3+0x4a76c8);
+        fprintf(stderr,"[autonew] START+A (mf=%ld) ci A(d%d,p%d) Start(d%d,p%d)\n",mf,
+          ci?((int*)ci)[12]:-1,ci?((int*)ci)[13]:-1,ci?((int*)ci)[30]:-1,ci?((int*)ci)[31]:-1); }
+      else if (ph==8) { g_onkey(fake_env,fake_thiz,108,0); g_onkey(fake_env,fake_thiz,96,0); }
     }
 
     { static uintptr_t sa2=0; if(!sa2) sa2=so_find_addr_safe("_ZN4RSDK5Audio15deviceAvailableE"); if(sa2)*(int*)sa2=1; }
@@ -353,6 +356,11 @@ void jni_run(void) {
             uintptr_t *w=(uintptr_t*)e;
             for(int i=0;i<60;i++) for(unsigned j=0;j<3;j++) if(w[i]==tb+S[j].o)
               fprintf(stderr,"[menu] slot%d %s @field%d\n",s,S[j].n,i*8); } } }
+      { uintptr_t ci=*(uintptr_t*)(tb+0x4a76c8); uintptr_t c1=g_ctrl_base+144;
+        static int mpress0=0,mpress1=0;
+        if(ci){int*p=(int*)ci;for(int k=0;k<12;k++)if(p[k*3+1])mpress0=1;}
+        if(g_ctrl_base){int*p=(int*)c1;for(int k=0;k<12;k++)if(p[k*3+1])mpress1=1;}
+        if(f%120==45){fprintf(stderr,"[menuin] ctrl0_press_seen=%d ctrl1_press_seen=%d\n",mpress0,mpress1);mpress0=mpress1=0;} }
       if (f%60==15) {
         uintptr_t pv=*(uintptr_t*)(tb+0x490e08); uintptr_t us=pv?*(uintptr_t*)pv:0;
         fprintf(stderr,"[menu] us=0x%lx auth=%d storage=%d perm=%d conflict=%d | saveLd=%d optLd=%d\n",
