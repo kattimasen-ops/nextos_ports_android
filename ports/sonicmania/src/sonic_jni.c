@@ -258,8 +258,9 @@ void jni_run(void) {
         fprintf(stderr, "[ev] JOYAXIS %d=%d\n", ev.jaxis.axis, ev.jaxis.value);
       } else if (ev.type == SDL_CONTROLLERDEVICEADDED) SDL_GameControllerOpen(ev.cdevice.which);
     }
-    /* auto-teste: aperta START no frame 250/255 p/ ver se a cena avança */
-    if (g_onkey) {
+    /* auto-aperto START/A SÓ na Title (p/ avançar a tela-título). Na Menu PARA,
+     * senão o A repetido fica disparando transições e o swirl não assenta. */
+    if (g_onkey && !(s_folder && memcmp((char*)s_folder,"Menu",5)==0)) {
       long ph = f % 60;
       if (ph == 0) { g_onkey(fake_env, fake_thiz, 108, 1); g_onkey(fake_env, fake_thiz, 96, 1); }
       else if (ph == 4) { g_onkey(fake_env, fake_thiz, 108, 0); g_onkey(fake_env, fake_thiz, 96, 0); }
@@ -318,12 +319,62 @@ void jni_run(void) {
        * MenuSetup = *(tb+0x4a7b20). So depois de initializedSaves(+20) setar. */
       { uintptr_t ms=*(uintptr_t*)(tb+0x4a7b20);
         if (ms && *(int*)(ms+20)!=0 && *(int*)(ms+16)==0) {
-          *(int*)(ms+16)=1; fprintf(stderr,"[menu] forcado MenuSetup->initializedAPI=1\n"); } }
+          *(int*)(ms+16)=1; fprintf(stderr,"[menu] forcado MenuSetup->initializedAPI=1\n"); }
+        if (ms && f%60==15) { uintptr_t fx=*(uintptr_t*)(ms+48);
+          fprintf(stderr,"[menu] MS menuRet=%d menu=%d api=%d saves=%d | fxFade=0x%lx timer=%d\n",
+            *(int*)(ms+8),*(int*)(ms+12),*(int*)(ms+16),*(int*)(ms+20),(unsigned long)fx, fx?*(int*)(fx+104):-1); } }
+      /* scan entidades p/ achar UITransition (states MoveIn/Wait/MoveOut) e UIControl */
+      if (f%120==45) { static uintptr_t ge=0; if(!ge) ge=so_find_addr_safe("_ZN4RSDK12ObjectSystem9GetEntityEt");
+        if (ge) { struct{unsigned long o;const char*n;} S[]={{0x1aae84,"UITrans_MoveIn"},{0x1aae6c,"UITrans_Wait"},{0x1ab034,"UITrans_MoveOut"}};
+          for(int s=0;s<48;s++){ uintptr_t e=((uintptr_t(*)(unsigned))ge)(s); if(!e)continue;
+            uintptr_t *w=(uintptr_t*)e;
+            for(int i=0;i<60;i++) for(unsigned j=0;j<3;j++) if(w[i]==tb+S[j].o)
+              fprintf(stderr,"[menu] slot%d %s @field%d\n",s,S[j].n,i*8); } } }
       if (f%60==15) {
         uintptr_t pv=*(uintptr_t*)(tb+0x490e08); uintptr_t us=pv?*(uintptr_t*)pv:0;
         fprintf(stderr,"[menu] us=0x%lx auth=%d storage=%d perm=%d conflict=%d | saveLd=%d optLd=%d\n",
           (unsigned long)us, us?*(int*)(us+64):-1, us?*(int*)(us+68):-1, us?*(int*)(us+72):-1, us?*(int*)(us+60):-1,
           gp?*(int*)(gp+0x100a0):-1, gp?*(int*)(gp+0x414bc):-1);
+      }
+    }
+    /* ---- LOAD DIRETO de uma fase (pula o menu mobile). SONIC_ZONE=14 (GHZ1).
+     * globals: gameMode(+0)=0 Mania, playerID(+4)=1 Sonic. sceneInfo: activeCategory(+64),
+     * listPos(+36), state(+66)=0 ENGINESTATE_LOAD. ---- */
+    { const char *zs=getenv("SONIC_ZONE");
+      if (zs && f==280) { int zone=atoi(zs);
+        uintptr_t tb=(uintptr_t)g_copyslot-0x17d9bc;
+        uintptr_t gp=*(uintptr_t*)(tb+0x4a76d8); uintptr_t si=*(uintptr_t*)(tb+0x4a7098);
+        if (gp && si) {
+          *(int*)(gp+0)=0;            /* gameMode = Mania */
+          *(int*)(gp+4)=1;            /* playerID = Sonic */
+          *(unsigned char*)(si+64)=1; /* activeCategory = Mania Mode */
+          *(unsigned short*)(si+36)=(unsigned short)zone; /* listPos */
+          *(unsigned char*)(si+66)=0; /* state = ENGINESTATE_LOAD */
+          fprintf(stderr,"[zone] forcando load cena %d (GHZ1=14)\n",zone);
+        }
+      }
+    }
+    /* auto-RIGHT na gameplay (folder GHZ/CPZ/etc) p/ Sonic andar pra frente */
+    if (g_onkey && s_folder) { char *fo=(char*)s_folder;
+      int gameplay = strcmp(fo,"Logos")&&strcmp(fo,"Title")&&strcmp(fo,"Menu")&&fo[0]>='A'&&fo[0]<='Z';
+      if (gameplay) { static int held=0; if(!held){held=1; g_onkey(fake_env,fake_thiz,22,1); fprintf(stderr,"[play] segurando RIGHT (folder=%s)\n",fo);} }
+    }
+    /* ---- DUMP scene list 1x (achar uma zona p/ carregar direto) ---- */
+    if (f==180) { uintptr_t tb=(uintptr_t)g_copyslot-0x17d9bc;
+      uintptr_t si=*(uintptr_t*)(tb+0x4a7098);
+      if (si) { uintptr_t ld=*(uintptr_t*)(si+8); int catc=*(unsigned char*)(si+65);
+        fprintf(stderr,"[scn] sceneInfo=0x%lx listData=0x%lx catCount=%d activeCat=%d listPos=%d\n",
+          (unsigned long)si,(unsigned long)ld,catc,*(unsigned char*)(si+64),*(unsigned short*)(si+36));
+        /* stride do SceneListEntry: hash16+name32+folder16+id8+filter1 -> tenta 76 e 80 */
+        int stride=72; uintptr_t e=ld;
+        for (int i=0;i<80;i++){ char*nm=(char*)(e+16); char*fo=(char*)(e+48); char*id=(char*)(e+64);
+          if(nm[0]<32||nm[0]>126) break;
+          fprintf(stderr,"[scn] #%d name='%.20s' folder='%.12s' id='%.6s'\n",i,nm,fo,id); e+=stride; }
+        /* categorias */
+        uintptr_t lc=*(uintptr_t*)(si+16);
+        for (int c=0;c<catc;c++){ char*cn=(char*)(lc+c*56+16);
+          fprintf(stderr,"[scn] CAT%d '%.20s' start=%d end=%d\n",c,cn,
+            *(unsigned short*)(lc+c*56+48),*(unsigned short*)(lc+c*56+50)); }
       }
     }
     /* { extern void opensles_shim_pump_callbacks(void); opensles_shim_pump_callbacks(); } DISABLED p/ isolar crash */
