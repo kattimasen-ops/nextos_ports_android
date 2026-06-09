@@ -284,6 +284,12 @@ int main(void){
     if(z==(void*)0){ for(int i=0;i<1024;i++) *(volatile unsigned*)(uintptr_t)(i*4)=0xe12fff1eu; __builtin___clear_cache((char*)0,(char*)4096); fprintf(stderr,"[NULLPAGE] mapeada em 0 (bx lr)\n"); }
     else { fprintf(stderr,"[NULLPAGE] FALHOU (z=%p errno=%d)\n",z,errno); if(z!=MAP_FAILED)munmap(z,4096); } }
   fprintf(stderr,"=== RE4 Unity 2018 (ARM32 GLES2) ===\n");
+  /* libz: a Unity importa inflate/inflateEnd/inflateInit2_ p/ DESCOMPRIMIR assets/cena.
+     Sem libz no namespace, caiam no stub -> descompressao vazia -> o load assincrono nunca
+     completa -> a UnityMain trava esperando a fila de jobs. dlopen RTLD_GLOBAL torna inflate
+     visivel p/ dlsym(RTLD_DEFAULT) no re4_resolve. */
+  { void *z=dlopen("libz.so.1",RTLD_NOW|RTLD_GLOBAL); if(!z)z=dlopen("libz.so",RTLD_NOW|RTLD_GLOBAL);
+    fprintf(stderr,"[LIBZ] dlopen -> %p (inflate=%p)\n",z,dlsym(RTLD_DEFAULT,"inflate")); }
   size_t hs=48*1024*1024;
   void *heap=mmap(NULL,hs,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
   if(heap==MAP_FAILED){perror("mmap");return 1;}
