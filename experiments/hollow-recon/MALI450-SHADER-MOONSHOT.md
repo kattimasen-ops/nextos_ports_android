@@ -71,7 +71,7 @@ O build da **fonte local atual** regrediu vs o **binário ANTIGO do .87** (de 03
 - RE: `capstone`+`pyelftools` instalados (pip --user --break-system-packages).
   `/tmp/hk-gles/findxref.py` (caçador de xref com resync) + `/tmp/hk-gles/libunity.dis` (disasm).
 - Rodar: parar `emustation`, `HK_GLES2=1 SDL_VIDEODRIVER=mali NODRIVER=1 GC_DONT_GC=1 ./hollow-recon`.
-- ⚠️ Mali-450 é device PRIORITÁRIO do o autor — não quebrar; crash do harness ≠ wedge (reboot raro).
+- ⚠️ Mali-450 é device PRIORITÁRIO do autor — não quebrar; crash do harness ≠ wedge (reboot raro).
 
 ## Filosofia
 Igual o Bully: muitas sessões de grind, mas É POSSÍVEL (hardware confirmado). Não desistir.

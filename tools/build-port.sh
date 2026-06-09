@@ -19,7 +19,7 @@
 #
 set -euo pipefail
 
-NEXTOS_TOOLCHAIN="${NEXTOS_TOOLCHAIN:-/home/runner/NextOS-Elite-Edition/build.NextOS-Retro-Elite-Edition-Amlogic-old.aarch64-4/toolchain}"
+NEXTOS_TOOLCHAIN="${NEXTOS_TOOLCHAIN:-$HOME/NextOS-Elite-Edition/build.NextOS-Retro-Elite-Edition-Amlogic-old.aarch64-4/toolchain}"
 PORT="${1:?uso: build-port.sh <port-dir> [gles2]}"
 GLES2="OFF"; [ "${2:-}" = "gles2" ] && GLES2="ON"
 

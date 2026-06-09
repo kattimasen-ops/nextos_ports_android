@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build re4boot (so-loader Unity 2018 Mono ARM32 -> Mali-450). NAO versionar binario.
 set -e
-TC=/home/runner/NextOS-Elite-Edition/build.NextOS-Retro-Elite-Edition-Amlogic-old.aarch64-4/toolchain
+TC=$HOME/NextOS-Elite-Edition/build.NextOS-Retro-Elite-Edition-Amlogic-old.aarch64-4/toolchain
 CC=$TC/bin/armv8a-emuelec-linux-gnueabihf-gcc
 cd "$(dirname "$0")"
 $CC -O2 -fPIC -fno-omit-frame-pointer -o re4boot \

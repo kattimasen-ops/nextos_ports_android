@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-TC=/home/runner/NextOS-Elite-Edition/build.NextOS-Retro-Elite-Edition-Amlogic-old.aarch64-4/toolchain
+TC=$HOME/NextOS-Elite-Edition/build.NextOS-Retro-Elite-Edition-Amlogic-old.aarch64-4/toolchain
 CC=$TC/bin/armv8a-emuelec-linux-gnueabihf-gcc
 cd "$(dirname "$0")"
 $CC -O2 -fPIC -o re4recon \

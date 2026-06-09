@@ -1,5 +1,5 @@
 import subprocess, sys
-LIB="/home/runner/re4-build/lib/armeabi-v7a/libunity.so"
+LIB="$HOME/re4-build/lib/armeabi-v7a/libunity.so"
 out = subprocess.check_output(["readelf","-W","--dyn-syms",LIB]).decode()
 und=set()
 for ln in out.splitlines():

@@ -15,6 +15,7 @@
  */
 #define _GNU_SOURCE
 #include <pthread.h>
+#include <signal.h>
 #include <semaphore.h>
 #include <stdlib.h>
 #include <string.h>
@@ -130,15 +131,29 @@ static int sh_rwl_destroy(void *l) { (void)l; return 0; }
 /* ---- pthread_create: Unity passa pthread_attr_t BIONIC (layout != glibc).
    bionic attr: flags@0, stack_base@8, stack_size@16, guard_size@24, policy@32, prio@36.
    Traduzimos so o stack_size (resto = default glibc). ---- */
+/* Wrapper: DESBLOQUEIA os sinais do Boehm GC (SIGPWR=30 suspend, SIGXCPU=24 restart) na thread
+   nova. O GC tenta desbloquear via pthread_sigmask com sigset_t BIONIC -> glibc le/escreve 128B
+   (ABI != bionic 8B) -> unblock falha -> SIGPWR fica BLOQUEADO -> a thread nao suspende no
+   stop-the-world -> GC trava esperando ack. Fazemos o unblock com sigset glibc CORRETO aqui. */
+struct sh_thunk { void *(*fn)(void *); void *arg; };
+static void sh_unblock_gc_signals(void){
+  sigset_t s; sigemptyset(&s);
+  sigaddset(&s, 30); sigaddset(&s, 24);   /* SIGPWR, SIGXCPU (Boehm) */
+  sigaddset(&s, SIGPWR); sigaddset(&s, SIGXCPU);
+  pthread_sigmask(SIG_UNBLOCK, &s, NULL);
+}
+static void *sh_thread_start(void *p){ struct sh_thunk t = *(struct sh_thunk *)p; free(p);
+  sh_unblock_gc_signals(); return t.fn(t.arg); }
 static int sh_create(void *thr, const void *battr, void *(*fn)(void *), void *arg) {
   pthread_attr_t ga; pthread_attr_init(&ga);
   if (battr) {
     size_t ss = *(const size_t *)((const unsigned char *)battr + 8);
     if (ss >= 32768 && ss <= (256UL << 20)) pthread_attr_setstacksize(&ga, ss);
   }
-  fprintf(stderr,"[THREAD] sh_create fn=%p\n",fn); int r = pthread_create((pthread_t *)thr, &ga, fn, arg);
+  struct sh_thunk *th = (struct sh_thunk *)malloc(sizeof *th); th->fn = fn; th->arg = arg;
+  fprintf(stderr,"[THREAD] sh_create fn=%p\n",fn); int r = pthread_create((pthread_t *)thr, &ga, sh_thread_start, th);
   pthread_attr_destroy(&ga);
-  if (r) fprintf(stderr, "[pthread] create FALHOU r=%d\n", r);
+  if (r) { fprintf(stderr, "[pthread] create FALHOU r=%d\n", r); free(th); }
   return r;
 }
 static int sh_attr_init(void *a) { if (a) memset(a, 0, 24); return 0; } /* bionic attr=24B (nao 56!) */

@@ -328,7 +328,7 @@ void jni_run(void) {
       else if (ph == 4) { g_onkey(fake_env, fake_thiz, 108, 0); g_onkey(fake_env, fake_thiz, 96, 0); }
     }
     /* SONIC_AUTONEW: auto-navega o menu (aperta A) p/ testar o fluxo de jogo novo
-     * Mania Mode->save->personagem->iniciar, sem precisar do controle do o autor. */
+     * Mania Mode->save->personagem->iniciar, sem precisar do controle do autor. */
     if (g_onkey && getenv("SONIC_AUTONEW") && s_folder && memcmp((char*)s_folder,"Menu",5)==0) {
       static long mf=0; mf++;
       long ph=mf%120;

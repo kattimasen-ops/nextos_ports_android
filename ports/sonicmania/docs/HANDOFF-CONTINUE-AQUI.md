@@ -3,7 +3,7 @@
 ## TL;DR do estado (2026-06-09)
 - ✅ **IMAGEM 100%**: tela-título Sonic Mania Plus renderiza inteira, linda, ESTÁVEL (Logos Netflix/SEGA → Title), ~42fps, 0 crash. Ver `docs/sonic_mania_title_COMPLETO.png`.
 - ✅ **INPUT PROPAGA 100%** pro `RSDK::controller[]` (verificado por dump: START→keyStart.press com edge perfeito em controller[0] e [1]).
-- ❌ **TÍTULO NÃO AVANÇA** com o input (nem auto, nem controle real do o autor). **ESSA É A MISSÃO: descobrir por quê e destravar → jogável.**
+- ❌ **TÍTULO NÃO AVANÇA** com o input (nem auto, nem controle real do autor). **ESSA É A MISSÃO: descobrir por quê e destravar → jogável.**
 - 🔊 ÁUDIO: backend Oboe→opensles_shim→SDL2 wirado, MAS `onAudioReady` do engine lança exceção C++ (SIGABRT) → pump DESABILITADO. (2ª prioridade.)
 
 ## O QUE FUNCIONA (não mexer)
@@ -26,7 +26,7 @@ Decomp: `~/sonic-build/Sonic-Mania-Decompilation/SonicMania/Objects/Title/TitleS
 
 ## COMO BUILDAR/RODAR
 - Build: `cd ~/nextos_ports_android/ports/sonicmania && bash build.sh` (toolchain NextOS Amlogic-old aarch64).
-- Deploy: `scp ports/sonicmania/sonicmania root@<DEVICE_IP>:/storage/roms/ports/sonicmania/` (senha removida). **scp do path ports/sonicmania/, NÃO da raiz.**
+- Deploy: `scp ports/sonicmania/sonicmania root@<DEVICE_IP>:/storage/roms/ports/sonicmania/` (senha do device). **scp do path ports/sonicmania/, NÃO da raiz.**
 - Rodar: `ssh root@<DEVICE_IP>` → `systemctl stop emustation; sleep 2; cd /storage/roms/ports/sonicmania; ./sonicmania > /tmp/sonic.log 2>&1`. Restart emustation depois.
 - Screenshot: `dd if=/dev/fb0 of=/tmp/fb.raw bs=1M count=4` → puxar → PIL frombytes RGBA 1280x720, trocar B/R.
 - .so de referência (símbolos/disasm): `/tmp/sm-so/lib/arm64-v8a/libsonicmania.so`. Toolchain nm/objdump em ~/NextOS-Elite-Edition/build.*/toolchain/bin/.
