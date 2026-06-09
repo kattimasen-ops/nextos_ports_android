@@ -22,15 +22,28 @@
 #include <stdio.h>
 
 #define PMAP_SZ 32768
-static struct { void *bionic; void *glibc; } g_pmap[PMAP_SZ];
+static struct { void * volatile bionic; void * volatile glibc; } g_pmap[PMAP_SZ];
 static pthread_mutex_t g_pmap_lock = PTHREAD_MUTEX_INITIALIZER;
 
 enum { K_MUTEX, K_COND, K_SEM, K_RWLOCK };
 
+/* pmap_get e chamado de SIGNAL HANDLERS (o GC do Mono faz sem_post no handler de suspend da
+   stop-the-world). pthread_mutex NAO e async-signal-safe -> se a thread interrompida segurava o
+   g_pmap_lock, o handler deadlocka -> GC trava (todas as threads esperam em GC_end_blocking).
+   FIX: LOOKUP lock-free (mapa append-only; glibc escrito ANTES de bionic c/ barreira -> reader que
+   ve bionic==alvo tb ve glibc valido). So o INSERT trava. */
 static void *pmap_get(void *bionic, int kind, unsigned sem_val) {
   if (!bionic) return NULL;
-  pthread_mutex_lock(&g_pmap_lock);
   uintptr_t h = ((uintptr_t)bionic >> 4) % PMAP_SZ;
+  /* 1) lookup lock-free */
+  for (int i = 0; i < PMAP_SZ; i++) {
+    int idx = (int)((h + i) % PMAP_SZ);
+    void *b = g_pmap[idx].bionic;
+    if (b == bionic) { __sync_synchronize(); return g_pmap[idx].glibc; }
+    if (b == NULL) break; /* fim da cadeia -> nao existe; vai inserir */
+  }
+  /* 2) insert (com lock) */
+  pthread_mutex_lock(&g_pmap_lock);
   void *ret = NULL;
   for (int i = 0; i < PMAP_SZ; i++) {
     int idx = (int)((h + i) % PMAP_SZ);
@@ -53,8 +66,8 @@ static void *pmap_get(void *bionic, int kind, unsigned sem_val) {
         g = calloc(1, sizeof(pthread_rwlock_t));
         if (g) pthread_rwlock_init((pthread_rwlock_t *)g, NULL);
       }
+      g_pmap[idx].glibc = g; __sync_synchronize(); /* glibc ANTES de bionic (barreira) */
       g_pmap[idx].bionic = bionic;
-      g_pmap[idx].glibc = g;
       ret = g;
       break;
     }
