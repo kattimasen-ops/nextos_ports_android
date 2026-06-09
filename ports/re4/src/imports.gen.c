@@ -65,11 +65,22 @@ static long ig_sysconf(int name){ long r=sysconf(name);
 static int ig_getpagesize(void){ return 4096; }
 /* GC pega bounds da pilha; glibc retorna base=0 p/ a thread Unity -> GC varre de ~0 -> crash.
    Forcamos bounds VALIDOS (reais via glibc, ou fallback baseado no SP atual). */
+static int ig_getattr_np(void *thr,void *battr){ (void)thr;
+  void *b=0; size_t sz=0; pthread_attr_t ga;
+  if(pthread_getattr_np(pthread_self(),&ga)==0){ pthread_attr_getstack(&ga,&b,&sz); pthread_attr_destroy(&ga); }
+  uintptr_t sp; __asm__ volatile("mov %0, sp":"=r"(sp)); uintptr_t lo=(uintptr_t)b,hi=lo+sz;
+  if(!b||!sz||sp<=lo||sp>=hi){ lo=(sp&~0xfffUL)-0x80000UL; hi=(sp&~0xfffUL)+0x80000UL; b=(void*)lo; sz=hi-lo; }
+  if(battr){ memset(battr,0,64); *(void**)((char*)battr+4)=b; *(size_t*)((char*)battr+8)=sz; }
+  static int n=0; if(n++<8) fprintf(stderr,"[IG-GETATTR] base=%p size=%zu sp=%p\n",b,sz,(void*)sp); return 0; }
 static int ig_attr_getstack(void *attr,void **base,size_t *size){ (void)attr;
   void *b=0; size_t sz=0; pthread_attr_t ga;
   if(pthread_getattr_np(pthread_self(),&ga)==0){ pthread_attr_getstack(&ga,&b,&sz); pthread_attr_destroy(&ga); }
-  if(!b||!sz){ uintptr_t sp; __asm__ volatile("mov %0, sp":"=r"(sp)); sz=8UL*1024*1024; b=(void*)(((sp - sz) + 0x10000UL) & ~0xfffUL); }
-  if(base)*base=b; if(size)*size=sz; fprintf(stderr,"[IG-STACK] base=%p size=%zu\n",b,sz); return 0; }
+  uintptr_t sp; __asm__ volatile("mov %0, sp":"=r"(sp));
+  uintptr_t lo=(uintptr_t)b, hi=lo+sz;
+  /* o Mono (threads.c:928) exige lo < SP < hi. Se os bounds reais nao contem o SP, deriva do SP. */
+  if(!b||!sz||sp<=lo||sp>=hi){ lo=(sp & ~0xfffUL)-0x80000UL; hi=(sp & ~0xfffUL)+0x80000UL; b=(void*)lo; sz=hi-lo; }
+  if(base)*base=b; if(size)*size=sz;
+  static int n=0; if(n++<8) fprintf(stderr,"[IG-STACK] base=%p size=%zu sp=%p\n",b,sz,(void*)sp); return 0; }
 static int ig_sysinfo(struct sysinfo *info){ if(info){ memset(info,0,sizeof(*info));
   info->totalram=512UL*1024*1024; info->freeram=256UL*1024*1024; info->sharedram=0; info->bufferram=0;
   info->totalswap=256UL*1024*1024; info->freeswap=256UL*1024*1024; info->mem_unit=1; info->procs=4; info->uptime=120;
@@ -79,6 +90,7 @@ void *re4_resolve(const char *nm){
   if(!strcmp(nm,"getpagesize")) return (void*)&ig_getpagesize;
   if(!strcmp(nm,"sysinfo")) return (void*)&ig_sysinfo;
   if(!strcmp(nm,"pthread_attr_getstack")) return (void*)&ig_attr_getstack;
+  if(!strcmp(nm,"pthread_getattr_np")) return (void*)&ig_getattr_np;
   ctype_build();
   if(!strcmp(nm,"_ctype_")) return &g_ctype[1];
   if(!strcmp(nm,"_tolower_tab_")) return &g_tolower[1];

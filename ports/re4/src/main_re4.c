@@ -191,7 +191,7 @@ static int my_sigaction(int sig,const void*act,void*old){
   struct sigaction g; memset(&g,0,sizeof g);
   g.sa_sigaction=(void(*)(int,siginfo_t*,void*))h; sigemptyset(&g.sa_mask); g.sa_flags=SA_SIGINFO|SA_RESTART;
   static int sn=0; if(sn++<12) fprintf(stderr,"[SIGACT] sig=%d handler=%p (struct bionic->glibc)\n",sig,h);
-  return sigaction(sig,&g,NULL); }
+  int rr=sigaction(sig,&g,NULL); return rr<0?0:rr; }
 /* intercepta abort/raise/pthread_kill: loga o caller (engine) + NAO mata -> vejo o pos-fatal */
 static int my_raise(int sig){ fprintf(stderr,"[RAISE] sig=%d caller=unity+0x%lx -> IGNORADO\n",sig,(unsigned long)__builtin_return_address(0)-(unsigned long)text_virtbase); return 0; }
 static void my_abort(void){ fprintf(stderr,"[ABORT] caller=unity+0x%lx -> IGNORADO\n",(unsigned long)__builtin_return_address(0)-(unsigned long)text_virtbase); }
