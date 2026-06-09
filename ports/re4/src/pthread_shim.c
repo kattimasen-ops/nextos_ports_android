@@ -120,7 +120,7 @@ static int sh_create(void *thr, const void *battr, void *(*fn)(void *), void *ar
   if (r) fprintf(stderr, "[pthread] create FALHOU r=%d\n", r);
   return r;
 }
-static int sh_attr_init(void *a) { if (a) memset(a, 0, 56); return 0; }
+static int sh_attr_init(void *a) { if (a) memset(a, 0, 24); return 0; } /* bionic attr=24B (nao 56!) */
 static int sh_attr_destroy(void *a) { (void)a; return 0; }
 static int sh_attr_setstacksize(void *a, size_t s) {
   if (a) *(size_t *)((unsigned char *)a + 8) = s; return 0;  /* bionic 32-bit stack_size@8 */
@@ -142,7 +142,7 @@ static int sh_getattr_np(void *thread_, void *battr) {
   if (r == 0) pthread_attr_getstack(&ga, &base, &size);
   pthread_attr_destroy(&ga);
   if (battr) {
-    memset(battr, 0, 56);
+    memset(battr, 0, 24); /* bionic attr=24B; memset 56 ESTOURAVA o buffer do caller -> regs salvos zerados */
     /* bionic pthread_attr_t 32-bit (armeabi-v7a): flags@0, stack_base@4, stack_size@8 */
     *(void **)((char *)battr + 4) = base;
     *(size_t *)((char *)battr + 8) = size;

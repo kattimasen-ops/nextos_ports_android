@@ -70,7 +70,10 @@ static int ig_getattr_np(void *thr,void *battr){ (void)thr;
   if(pthread_getattr_np(pthread_self(),&ga)==0){ pthread_attr_getstack(&ga,&b,&sz); pthread_attr_destroy(&ga); }
   uintptr_t sp; __asm__ volatile("mov %0, sp":"=r"(sp)); uintptr_t lo=(uintptr_t)b,hi=lo+sz;
   if(!b||!sz||sp<=lo||sp>=hi){ lo=(sp&~0xfffUL)-0x80000UL; hi=(sp&~0xfffUL)+0x80000UL; b=(void*)lo; sz=hi-lo; }
-  if(battr){ memset(battr,0,64); *(void**)((char*)battr+4)=b; *(size_t*)((char*)battr+8)=sz; }
+  /* BIONIC pthread_attr_t armeabi-v7a = 24 bytes (flags@0,base@4,size@8,guard@12,policy@16,prio@20).
+     memset de 64 ESTOURAVA o buffer do caller (24B) -> zerava os regs salvos (r4/fp/lr) na pilha
+     -> F fazia pop {r4,fp,pc} com lr=0 -> CRASH pc=0 ("NULL-call no init"). Fix: 24 bytes. */
+  if(battr){ memset(battr,0,24); *(void**)((char*)battr+4)=b; *(size_t*)((char*)battr+8)=sz; }
   static int n=0; if(n++<8) fprintf(stderr,"[IG-GETATTR] base=%p size=%zu sp=%p\n",b,sz,(void*)sp); return 0; }
 static int ig_attr_getstack(void *attr,void **base,size_t *size){ (void)attr;
   void *b=0; size_t sz=0; pthread_attr_t ga;

@@ -75,8 +75,12 @@ static int my_dlclose(void *h){ (void)h; return 0; }
 /* hooks pra VER a excecao que o Mono lanca (antes do throw crashar) */
 static void hook_exc_msg(void *img,const char *ns,const char *name,const char *msg){ (void)img;
   fprintf(stderr,"\n*** [MONO-EXC] %s.%s : %s ***\n",ns?ns:"?",name?name:"?",msg?msg:"(sem msg)"); fflush(stderr); _exit(42); }
+static void map_caller(const char*tag,unsigned long ra);
 static void hook_exc_two(void *img,const char *ns,const char *name,const char *m1,const char *m2){ (void)img;(void)m2;
-  fprintf(stderr,"\n*** [MONO-EXC2] %s.%s : %s ***\n",ns?ns:"?",name?name:"?",m1?m1:"?"); fflush(stderr); _exit(42); }
+  fprintf(stderr,"\n*** [MONO-EXC2] %s.%s : %s ***\n",ns?ns:"?",name?name:"?",m1?m1:"?");
+  map_caller("[MONO-EXC2]",(unsigned long)__builtin_return_address(0));
+  if(getenv("RE4_EXC_CONTINUE")){ fprintf(stderr,"[MONO-EXC2] continuando (gated)\n"); fflush(stderr); return; }
+  fflush(stderr); _exit(42); }
 static void hook_exc_name(void *img,const char *ns,const char *name){ (void)img;
   fprintf(stderr,"\n*** [MONO-EXC-N] %s.%s ***\n",ns?ns:"?",name?name:"?"); fflush(stderr); _exit(42); }
 /* loga mmap/mprotect EXEC + falhas -> ve a alocacao de exec-mem do JIT que da NULL */
@@ -99,10 +103,28 @@ static void *my_mmap(void *a,size_t l,int prot,int flags,int fd,long off){
   if((prot&PROT_EXEC)||p==MAP_FAILED){ static int n=0; if(n++<60) fprintf(stderr,"[MMAP] len=%zu prot=0x%x fd=%d -> %p\n",l,prot,fd,p==MAP_FAILED?(void*)-1:p); } return p; }
 static int my_mprotect(void *a,size_t l,int prot){ int r=mprotect(a,l,prot);
   if(prot&PROT_EXEC){ static int n=0; if(n++<60) fprintf(stderr,"[MPROT-X] %p len=%zu prot=0x%x -> %d(%s)\n",a,l,prot,r,r?strerror(errno):"ok"); } return r; }
-/* sysconf(_SC_PHYS_PAGES)=0 no so-loader -> Mono faz 0-used=negativo=3.8GB. Damos 512MB. */
-static long my_sysconf(int name){ long r=sysconf(name);
-  if((name==_SC_PHYS_PAGES||name==_SC_AVPHYS_PAGES) && r<=0){ long ps=sysconf(_SC_PAGESIZE); if(ps<=0)ps=4096;
-    r=(512L*1024*1024)/ps; fprintf(stderr,"[SYSCONF] name=%d 0->%ld (512MB)\n",name,r); } return r; }
+/* RAIZ do OutOfMemoryException + GC_page_size==0: libmono (BIONIC) chama sysconf com as
+   constantes _SC_* do BIONIC, que NAO batem com as do glibc. Ex: sysconf(40)=_SC_PAGESIZE bionic,
+   mas glibc 40 = outra coisa -> page size lixo -> GC_page_size errado -> heap=0 -> OOM.
+   Traducao bionic->valor correto (constantes de bionic/libc/include/bits/sysconf.h). */
+static long my_sysconf(int name){
+  long ps=4096;
+  switch(name){
+    case 39: case 40: /* bionic _SC_PAGE_SIZE / _SC_PAGESIZE */
+      fprintf(stderr,"[SYSCONF] bionic PAGESIZE(%d) -> 4096\n",name); return 4096;
+    case 6:  /* bionic _SC_CLK_TCK */ return 100;
+    case 96: case 97: /* bionic _SC_NPROCESSORS_CONF / _ONLN */
+      fprintf(stderr,"[SYSCONF] bionic NPROC(%d) -> 4\n",name); return 4;
+    case 98: /* bionic _SC_PHYS_PAGES */
+      fprintf(stderr,"[SYSCONF] bionic PHYS_PAGES -> 512MB\n"); return (512L*1024*1024)/ps;
+    case 99: /* bionic _SC_AVPHYS_PAGES */
+      fprintf(stderr,"[SYSCONF] bionic AVPHYS_PAGES -> 256MB\n"); return (256L*1024*1024)/ps;
+    default: break;
+  }
+  long r=sysconf(name);
+  if((name==_SC_PHYS_PAGES||name==_SC_AVPHYS_PAGES) && r<=0){ r=(512L*1024*1024)/ps; }
+  static int sc=0; if(sc++<30) fprintf(stderr,"[SYSCONF] glibc name=%d -> %ld\n",name,r);
+  return r; }
 /* BUG ACHADO: mono_pagesize() retorna 3.8GB (lixo) em vez de 4096 -> sgen pede mmap gigante.
    Forco 4096 (valor correto) -> conserta TODOS os tamanhos/alinhamentos do Mono. */
 static int my_mono_pagesize(void){ return 4096; }
@@ -297,9 +319,15 @@ int main(void){
   g_unity_base=(uintptr_t)text_virtbase; g_m_unity=so_save();
   { size_t msz=24*1024*1024; void *mh=mmap(NULL,msz,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     if(mh!=MAP_FAILED && so_load("libmono.so",mh,msz)>=0){ so_relocate(); so_resolve(dynlib_functions,dynlib_numfunctions,0);
-      { uintptr_t a; a=so_find_addr_safe("mono_exception_from_name_msg"); if(a)hook_arm64(a,(uintptr_t)hook_exc_msg);
-        a=so_find_addr_safe("mono_exception_from_name_two_strings"); if(a)hook_arm64(a,(uintptr_t)hook_exc_two);
-        a=so_find_addr_safe("mono_exception_from_name"); if(a)hook_arm64(a,(uintptr_t)hook_exc_name);
+      { uintptr_t a;
+        /* Os hooks de mono_exception_from_name* interceptam a CRIACAO de exceptions. O Mono
+           PRE-CRIA o singleton de OutOfMemoryException no init (em [domain+28]) -> nosso hook
+           matava o processo achando que era um throw. Gated em RE4_HOOKEXC (so p/ debug). */
+        if(getenv("RE4_HOOKEXC")){
+          a=so_find_addr_safe("mono_exception_from_name_msg"); if(a)hook_arm64(a,(uintptr_t)hook_exc_msg);
+          a=so_find_addr_safe("mono_exception_from_name_two_strings"); if(a)hook_arm64(a,(uintptr_t)hook_exc_two);
+          a=so_find_addr_safe("mono_exception_from_name"); if(a)hook_arm64(a,(uintptr_t)hook_exc_name);
+        }
         a=so_find_addr_safe("mono_valloc"); if(a)hook_arm64(a,(uintptr_t)my_mono_valloc);
         a=so_find_addr_safe("mono_pagesize"); if(a){hook_arm64(a,(uintptr_t)my_mono_pagesize); fprintf(stderr,"[HOOK] mono_pagesize -> 4096\n");}
         { uintptr_t ps=so_find_addr_safe("mono_pagesize"); uintptr_t base=ps-0x29d7e4; uintptr_t gt=base+0x1a6a8;
