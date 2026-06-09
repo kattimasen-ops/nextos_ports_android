@@ -8,9 +8,11 @@
 #include <signal.h>
 #include <ucontext.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include "so_util.h"
 #include "imports.h"
 #include "jni_shim.h"
+extern void *text_virtbase;
 extern void re4_fill(void);
 extern void recon_wire_pthread(void (*)(const char *, void *));
 extern void *jni_find_native(const char *);
@@ -24,10 +26,33 @@ static void re4_set_import(const char *name, void *fn){
     if(!strcmp(dynlib_functions[i].symbol,name)){ dynlib_functions[i].func=(uintptr_t)fn; return; }
 }
 static void *N(const char*n){ void*p=jni_find_native(n); fprintf(stderr,"  native %s = %p\n",n,p); return p; }
-/* TLS bionic-safe: bionic ignora delete de key invalida; glibc crasha. Rastreamos. */
-static unsigned char g_key_valid[4096];
-static int sh_key_create(pthread_key_t *k, void(*d)(void*)){ int r=pthread_key_create(k,d); if(r==0 && *k<4096) g_key_valid[*k]=1; return r; }
-static int sh_key_delete(pthread_key_t k){ if(k<4096){ if(!g_key_valid[k]) return 0; g_key_valid[k]=0; } return pthread_key_delete(k); }
+/* BRIDGE de TLS bionic auto-contido: as keys do engine viram SLOTS minhas (1 glibc key so
+   guarda o array por-thread). O engine nunca toca o pthread_key do glibc -> sem corrupcao. */
+#define NSLOT 1024
+static pthread_key_t g_tls_base; static int g_tls_init=0;
+static int g_slot_next=1; static pthread_mutex_t g_slot_mtx=PTHREAD_MUTEX_INITIALIZER;
+static void tls_dtor(void *p){ free(p); }
+static void tls_ensure(void){ if(!g_tls_init){ pthread_key_create(&g_tls_base,tls_dtor); g_tls_init=1; } }
+static void **tls_slots(void){ tls_ensure(); void **s=(void**)pthread_getspecific(g_tls_base);
+  if(!s){ s=(void**)calloc(NSLOT,sizeof(void*)); pthread_setspecific(g_tls_base,s); } return s; }
+static int sh_key_create(pthread_key_t *k, void(*d)(void*)){ static int kc=0; if(kc++<8)fprintf(stderr,"[TLS] key_create dtor=%p\n",d); pthread_mutex_lock(&g_slot_mtx);
+  int n=g_slot_next++; pthread_mutex_unlock(&g_slot_mtx); if(n>=NSLOT) return 11; *k=(pthread_key_t)n; return 0; }
+static int sh_key_delete(pthread_key_t k){ fprintf(stderr,"[TLS] key_delete %d (no-op)\n",(int)k); return 0; }
+static void *sh_getspecific(pthread_key_t k){ if((int)k<=0||(int)k>=NSLOT) return NULL; return tls_slots()[(int)k]; }
+static int sh_setspecific(pthread_key_t k, const void *v){ if((int)k<=0||(int)k>=NSLOT) return 22; tls_slots()[(int)k]=(void*)v; return 0; }
+/* __android_log REAL -> stderr (sem isso, o erro do engine antes do abort some) */
+static int my_alog_print(int prio,const char*tag,const char*fmt,...){ va_list ap; va_start(ap,fmt);
+  fprintf(stderr,"[ALOG:%d %s] ",prio,tag?tag:"?"); vfprintf(stderr,fmt,ap); fprintf(stderr,"\n"); va_end(ap); return 0; }
+static int my_alog_write(int prio,const char*tag,const char*msg){ fprintf(stderr,"[ALOG:%d %s] %s\n",prio,tag?tag:"?",msg?msg:""); return 0; }
+static int my_alog_vprint(int prio,const char*tag,const char*fmt,va_list ap){ fprintf(stderr,"[ALOG:%d %s] ",prio,tag?tag:"?"); vfprintf(stderr,fmt,ap); fprintf(stderr,"\n"); return 0; }
+/* bloqueia o engine de instalar handler de crash p/ SIGSEGV/ABRT/etc -> MEU handler pega o crash REAL */
+static int my_sigaction(int sig,const void*act,void*old){ (void)act;(void)old;
+  if(sig==SIGSEGV||sig==SIGABRT||sig==SIGILL||sig==SIGBUS||sig==SIGFPE){ fprintf(stderr,"[SIGACT] engine quis handler sig %d -> IGNORADO\n",sig); return 0; }
+  return sigaction(sig,(const struct sigaction*)act,(struct sigaction*)old); }
+/* intercepta abort/raise/pthread_kill: loga o caller (engine) + NAO mata -> vejo o pos-fatal */
+static int my_raise(int sig){ fprintf(stderr,"[RAISE] sig=%d caller=unity+0x%lx -> IGNORADO\n",sig,(unsigned long)__builtin_return_address(0)-(unsigned long)text_virtbase); return 0; }
+static void my_abort(void){ fprintf(stderr,"[ABORT] caller=unity+0x%lx -> IGNORADO\n",(unsigned long)__builtin_return_address(0)-(unsigned long)text_virtbase); }
+static int my_ptkill(unsigned long t,int sig){ (void)t; fprintf(stderr,"[PTKILL] sig=%d caller=unity+0x%lx -> IGNORADO\n",sig,(unsigned long)__builtin_return_address(0)-(unsigned long)text_virtbase); return 0; }
 extern void *text_virtbase;
 static void on_segv(int sig, siginfo_t *si, void *uc_){
   ucontext_t *uc=(ucontext_t*)uc_;
@@ -59,6 +84,15 @@ int main(void){
   re4_fill(); recon_wire_pthread(re4_set_import);
   re4_set_import("pthread_key_create",(void*)sh_key_create);
   re4_set_import("pthread_key_delete",(void*)sh_key_delete);
+  re4_set_import("pthread_getspecific",(void*)sh_getspecific);
+  re4_set_import("pthread_setspecific",(void*)sh_setspecific);
+  re4_set_import("__android_log_print",(void*)my_alog_print);
+  re4_set_import("__android_log_write",(void*)my_alog_write);
+  re4_set_import("__android_log_vprint",(void*)my_alog_vprint);
+  re4_set_import("sigaction",(void*)my_sigaction);
+  re4_set_import("abort",(void*)my_abort);
+  re4_set_import("raise",(void*)my_raise);
+  re4_set_import("pthread_kill",(void*)my_ptkill);
   so_resolve(dynlib_functions,dynlib_numfunctions,0); so_finalize();
   so_execute_init_array();
   fprintf(stderr,"[A] engine init OK (372 ctors)\n");

@@ -115,7 +115,7 @@ static int sh_create(void *thr, const void *battr, void *(*fn)(void *), void *ar
     size_t ss = *(const size_t *)((const unsigned char *)battr + 16);
     if (ss >= 32768 && ss <= (256UL << 20)) pthread_attr_setstacksize(&ga, ss);
   }
-  int r = pthread_create((pthread_t *)thr, &ga, fn, arg);
+  fprintf(stderr,"[THREAD] sh_create fn=%p\n",fn); int r = pthread_create((pthread_t *)thr, &ga, fn, arg);
   pthread_attr_destroy(&ga);
   if (r) fprintf(stderr, "[pthread] create FALHOU r=%d\n", r);
   return r;

@@ -65,3 +65,25 @@ feito (sh_key_create/delete) mas a chamada e interna -> nao resolve.
   armv8a-emuelec-linux-gnueabihf-gcc. Diagnostico: segv handler + maps/regs/stack scan.
 - Device /storage/roms/re4-recon/: re4boot + libunity.so + assets/ (351MB) + run.sh.
 - Marco: PRIMEIRA Unity (2018 Mono) bootando engine+JNI+janela GLES2 no Mali-450 ARM32.
+
+## FASE 1 -- parede do gfx-init (2026-06-09, sessao 2)
+Apos a engine bootar (init_array+JNI+janela GLES2+initJni), trava em nativeRecreateGfxState:
+- crash = gettid+tgkill(SIGSEGV) em glibc (offset 0x7c61c) = a engine/glibc faz **raise(SIGSEGV)
+  DELIBERADO** (caminho de erro FATAL da Unity), NAO um segfault real.
+- A RAZAO do erro esta ENGOLIDA: __android_log (implementado -> stderr) NAO mostra nada antes;
+  a Unity provavelmente loga via __sF (stdio bionic, layout != glibc -> incompativel).
+- raise/abort/pthread_kill sao chamados GLIBC-INTERNO (lr no libc) -> override por GOT NAO pega.
+
+TENTADO (nao resolveu o abort): (1) TLS bridge auto-contido (sh_key_create/delete/get/setspecific
+em slots proprias -- CONFIRMADO funcionando p/ as keys do engine, mas o crash e interno);
+(2) bloquear sigaction da Unity p/ SIGSEGV/ABRT (MEU handler pega, mas crash = no proprio tgkill);
+(3) interceptar abort/raise/pthread_kill (nao pega -- glibc interno); (4) boot.config single-thread
+(gfx-disable-mt-rendering=1, gfx-enable-*-jobs=0) -- abort persiste.
+
+RAIZ: paredes FUNDAS de ABI bionic!=glibc no gfx-init (pthread/TLS interno, stdio/__sF, sinais).
+Proximo nivel = ambiente fake-bionic mais completo (TCB/pthread_self/__sF bionic) OU backtrace/
+instrumentacao melhor p/ achar a razao FATAL engolida. Frente grande e nova.
+
+### Diagnostico/infra que ja temos (no main_re4.c)
+segv handler (fault/pc/lr + maps + regs + stack-scan unity), __android_log real, sigaction-block,
+abort/raise/pthread_kill intercept, TLS bridge, init_array index+addr logging, RE4_SKIP.
