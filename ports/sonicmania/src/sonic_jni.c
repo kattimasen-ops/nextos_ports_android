@@ -158,6 +158,8 @@ void jni_run(void) {
   uintptr_t s_info = so_find_addr_safe("_ZN4RSDK4Game4infoE");
   uintptr_t s_scene = so_find_addr_safe("_ZN4RSDK5Stage12currentSceneE");
   uintptr_t s_scr = so_find_addr_safe("_ZN4RSDK8Graphics10screenListE");
+  uintptr_t s_sinfo = so_find_addr_safe("_ZN4RSDK5Stage4infoE");
+  uintptr_t s_folder = so_find_addr_safe("_ZN4RSDK5Stage13currentFolderE");
   fprintf(stderr, "[state] syms run=%p cont=%p info=%p\n", (void*)s_run, (void*)s_cont, (void*)s_info);
   fprintf(stderr, "[drv] entrando no loop step\n");
   for (long f = 0; st; f++) {
@@ -170,7 +172,9 @@ void jni_run(void) {
       if (f%120==1) fprintf(stderr, "[state] running=%d container=%d info=%d %d %d %d\n",
           s_run?*(int*)s_run:-9, s_cont?*(unsigned char*)s_cont:255,
           s_info?((int*)s_info)[0]:-9, s_info?((int*)s_info)[1]:-9, s_info?((int*)s_info)[2]:-9, s_scene?*(int*)s_scene:-9);
-        if (s_scr) { unsigned short *fb=(unsigned short*)s_scr; long nz=0; for(int i=0;i<424*240;i++) if(fb[i]) nz++; fprintf(stderr,"[fb] screenList[0] nonzero=%ld/%d\n", nz, 424*240); } }
+        if (s_scr) { unsigned short *fb=(unsigned short*)s_scr; long nz=0; for(int i=0;i<1280*256;i++) if(fb[i]) nz++; fprintf(stderr,"[fb] screenList nonzero=%ld/%d\n", nz, 1280*256); }
+        if (s_sinfo) { int *si=(int*)s_sinfo; fprintf(stderr,"[scene] info ints:"); for(int i=0;i<14;i++) fprintf(stderr," %d",si[i]); fprintf(stderr,"\n"); }
+        if (s_folder) fprintf(stderr,"[scene] folder='%.16s'\n", (char*)s_folder); }
     SDL_GL_SwapWindow(g_win);
   }
 }
