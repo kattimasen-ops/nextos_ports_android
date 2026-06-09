@@ -1,0 +1,67 @@
+# RE4 (Resident Evil 4 fan, Unity 2018 Mono) -> Mali-450 armhf GLES2 -- STATUS
+
+## Recon
+- APK: ~/Downloads/Red... Resident Evil 4 fan-made em **Unity 2018.1.1f1 Mono** (NAO o nativo Capcom).
+- libunity.so 18MB + libmono.so 3.8MB + libmain.so (boot). **v7a + x86 (SEM arm64)**. 208MB.
+- **GLES2 path EXISTE** (force-gles20, "OpenGL ES 2.0 is required") -> NAO e GLES3-only (≠ HK).
+- **ZERO Vulkan, ZERO IL2CPP**. Mono (Unity antigo, pre-Swappy/Choreographer).
+- Assets: assets/bin/Data/ (Unity, 473 arquivos).
+
+## Alvo (device Amlogic-old)
+- ARM 32-bit armhf, interp /lib/ld-linux-armhf.so.3 (= GTA CTW). Runtime em /usr/lib32 + /lib.
+- Toolchain: armv8a-emuelec-linux-gnueabihf-gcc (Amlogic-old).
+
+## FASE 0 -- PASSOU (2026-06-08) ✅
+Escrito do ZERO: `src/so_util.c` ARM32 (Elf32, relocs REL .rel.dyn/.rel.plt, R_ARM_RELATIVE/
+GLOB_DAT/JUMP_SLOT/ABS32 addend in-place, hook_arm=LDR PC, init_array /4), `src/main_re4.c`
+(load->reloc->recon imports, SEM executar), `build_re4.sh`.
+RESULTADO no device: re4recon (ELF32 ARM) **carregou + relocou libunity.so** (39k R_ARM_RELATIVE)
+e listou **308 imports**. "FASE 0 OK". Loader ARM32 Unity FUNCIONA.
+
+## Contrato de imports (IMPORTS.txt, 308) -- como fornecer
+- libc/pthread/__aeabi*/C++ABI (__cxa_*, _Unwind_*) -> passthrough glibc + libgcc.
+- bionic-isms: _ctype_, __sF, __errno, _tolower_tab_, __system_property_get -> SHIM.
+- __android_log_* -> stderr. __google_potentially_blocking_region_* -> no-op.
+- ALooper_forThread/prepare -> Looper (Unity 2018 simples). ANativeWindow_* -> shim (dims da janela).
+- egl* (API completa) -> egl_shim SDL2-mali (reusar do Bully/HK). gl* -> via eglGetProcAddress.
+
+## FASE 1 (proximo) -- imports table -> init_array -> JNI_OnLoad -> boot Unity
+1. Gerar dynlib_functions (tools/new-port.sh OU adaptar imports do HK) p/ os 308.
+2. egl_shim + jni_shim (reusar HK, adaptar p/ ARM32 + Unity 2018 + Mono + libmain boot).
+3. so_execute_init_array -> JNI_OnLoad (libmain->libunity) -> UnityPlayer init -> nativeRender.
+4. Assets: extrair APK p/ o device (assets/bin/Data) + apontar o caminho.
+
+## HIPOTESE-CHAVE (porque pode destravar Unity de vez)
+Unity 2018 + GLES2 + Mono + pre-Swappy = as DUAS paredes do HK (GLES3 + Choreographer) podem
+NAO existir aqui. Se a engine montar a cena, e o template Unity-armhf-GLES2 reusavel.
+
+## Arquivos
+- PC: ~/nextos_ports_android/experiments/re4-recon/ (src/, build_re4.sh, lib/, IMPORTS.txt)
+- Device: /storage/re4-recon/ (re4recon + libunity.so)
+- APK: ~/Downloads/Red_Dead_Redemption_v1.58... (nome enganoso; e RE4) | libs em ~/re4-build/
+
+## FASE 1 -- BOOT (2026-06-09): engine INICIALIZA + janela GLES2 + lifecycle ate gfx-init 🏆
+Sequencia que FUNCIONA no device (ports/re4/re4boot, ARM32 nativo):
+- load + relocate (so_util ARM32) ✅
+- imports (355: dlsym RTLD_DEFAULT + shims bionic _ctype_/__sF/_tolower_tab_) ✅
+- 🔑🔑 PTHREAD BIONIC BRIDGE (pthread_shim recon_wire_pthread): SEM ele, init_array TRAVA em
+  DEADLOCK FUTEX (ctor 76/372, mutex estatico bionic mal-interpretado pelo glibc). COM ele os
+  372 ctors rodam. **ESSA E A CHAVE pra destravar Unity no so-loader (vale p/ qualquer Unity).**
+- init_array: 372 ctors C++ ✅
+- JNI_OnLoad -> 0x10006 (JNI 1.6); RegisterNatives UnityPlayer(18)+ReflectionHelper+ARCore ✅
+- janela SDL2/GLES2 criada (egl_shim core, provado Syberia/lswtcs/Bully) ✅
+- initJni(Context) ✅
+- nativeRecreateGfxState -> CRASHA aqui
+
+PAREDE ATUAL: SIGSEGV em glibc **pthread_key_delete+0x138** (lr TAMBEM em libc = chamada
+glibc-INTERNA, nao via GOT). r1 = valor-lixo que VARIA por run = TLS/thread-list do glibc
+corrompida pela engine bionic. Override do import NAO pega (interna). Wrapper TLS bionic-safe
+feito (sh_key_create/delete) mas a chamada e interna -> nao resolve.
+=> proximo: bridge de TLS/thread bionic mais profundo (pthread_self/__get_tls/thread-list proprios)
+   OU isolar a engine do modelo de thread do glibc.
+
+### Estado (tudo no device + repo)
+- ports/re4/ (src completo: so_util ARM32, imports.gen.c, main_re4.c, shims). Build: gen_imports.py +
+  armv8a-emuelec-linux-gnueabihf-gcc. Diagnostico: segv handler + maps/regs/stack scan.
+- Device /storage/roms/re4-recon/: re4boot + libunity.so + assets/ (351MB) + run.sh.
+- Marco: PRIMEIRA Unity (2018 Mono) bootando engine+JNI+janela GLES2 no Mali-450 ARM32.
