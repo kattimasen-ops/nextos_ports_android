@@ -241,6 +241,12 @@ void jni_run(void) {
      * ativa o menu. 0x20f4c4 cbz w0,20f5e4 -> NOP ; 0x20f518 cbnz w0,20f134 -> NOP ---- */
     if (tb0) { *(uint32_t*)(tb0+0x20f4c4)=0xd503201fu; *(uint32_t*)(tb0+0x20f518)=0xd503201fu;
       fprintf(stderr, "[patch] PrerollChecks gates NOP @%p\n", (void*)(tb0+0x20f4c4)); }
+    /* ---- PATCH crash da fase: destruir badnik (Player_Action_Enemy) chama
+     * Stats::TryTrackStat->DummyStats::TrackStat que faz std::wstring_convert::from_bytes
+     * e CRASHA na libc (string ruim). Stats são inúteis offline -> no-op (ret). ---- */
+    if (tb0) { *(uint32_t*)(tb0+0x4453a4)=0xd65f03c0u; /* Stats::TryTrackStat ret */
+      *(uint32_t*)(tb0+0x4457f8)=0xd65f03c0u; /* DummyStats::TrackStat ret */
+      fprintf(stderr, "[patch] Stats::TryTrackStat/TrackStat -> ret (no-op)\n"); }
     so_make_text_executable(); so_flush_caches(); }
   { int nj = SDL_NumJoysticks(); fprintf(stderr, "[input] %d joysticks\n", nj);
     for (int i=0;i<nj;i++){ if (SDL_IsGameController(i)) { SDL_GameControllerOpen(i); fprintf(stderr,"[input] gamecontroller %d aberto\n",i);} else { SDL_JoystickOpen(i); fprintf(stderr,"[input] joystick RAW %d aberto (%s)\n",i,SDL_JoystickNameForIndex(i)); } } }
