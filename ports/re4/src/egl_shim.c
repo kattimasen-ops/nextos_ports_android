@@ -46,8 +46,11 @@ static unsigned (*r_swapBuffers)(void*,void*);
 static int (*r_getError)(void);
 static void *(*r_createContext)(void*,void*,void*,const int*);
 static unsigned (*r_chooseConfig)(void*,const int*,void*,int,int*);
-static void *g_real_dpy=NULL, *g_real_surf=NULL, *g_real_ctx=NULL, *g_real_cfg=NULL;
+static void *(*r_createPbuffer)(void*,void*,const int*);
+static void *g_real_dpy=NULL, *g_real_surf=NULL, *g_real_ctx=NULL, *g_real_cfg=NULL, *g_real_pbuf=NULL;
 static int g_use_real_egl=0;
+static unsigned long g_creator_tid=0; /* thread que cria os contextos (setup) -> usa PBUFFER;
+                                         a thread de RENDER (outra) usa a surface do WINDOW. */
 static int frame_count = 0;
 static int next_context_id = 1;
 
@@ -104,6 +107,11 @@ void egl_shim_create_window(void) {
     int cfgattr[]={0x3028 /*EGL_CONFIG_ID*/, cfgid, 0x3038 /*EGL_NONE*/};
     r_chooseConfig(g_real_dpy, cfgattr, &g_real_cfg, 1, &n);
     debugPrintf("egl_shim: surface CONFIG_ID=%d cfg=%p n=%d\n", cfgid, g_real_cfg, n);
+    /* PBUFFER real p/ a thread de setup (pra nao segurar a surface do window) */
+    r_createPbuffer=dlsym(RTLD_DEFAULT,"eglCreatePbufferSurface");
+    if(r_createPbuffer && g_real_cfg){ int pb[]={0x3057/*WIDTH*/,16, 0x3056/*HEIGHT*/,16, 0x3038};
+      g_real_pbuf=r_createPbuffer(g_real_dpy, g_real_cfg, pb);
+      debugPrintf("egl_shim: pbuffer=%p (err=0x%x)\n", g_real_pbuf, r_getError?r_getError():0); }
     if(g_real_dpy&&g_real_surf&&g_real_ctx&&g_real_cfg&&n>0){ g_use_real_egl=1;
       debugPrintf("egl_shim: REAL EGL dpy=%p surf=%p ctx=%p cfg=%p (Bully-style, 1 ctx/thread)\n",
                   g_real_dpy,g_real_surf,g_real_ctx,g_real_cfg); }
@@ -224,6 +232,7 @@ EGLContext egl_shim_CreateContext(EGLDisplay dpy, EGLConfig config,
   c->id = next_context_id++;
   /* cria um contexto EGL REAL compartilhado (com o share-root g_real_ctx). NAO o torna current
      -> a thread que fizer MakeCurrent o ativa. Main e gfx-thread cada um seu contexto, compartilham. */
+  if (!g_creator_tid) g_creator_tid = (unsigned long)pthread_self(); /* 1a CreateContext = setup thread */
   if (g_use_real_egl && r_createContext) {
     int ctxattr[] = {0x3098 /*EGL_CONTEXT_CLIENT_VERSION*/, 2, 0x3038 /*EGL_NONE*/};
     c->real_ctx = r_createContext(g_real_dpy, g_real_cfg, g_real_ctx /*share*/, ctxattr);
@@ -250,14 +259,23 @@ EGLBoolean egl_shim_MakeCurrent(EGLDisplay dpy, EGLSurface draw,
       current_context = NULL; has_real_gl = 0;
     } else {
       current_context = context; last_context = context;
-      void *rc = context->real_ctx ? context->real_ctx : g_real_ctx;
-      r = r_makeCurrent(g_real_dpy, g_real_surf, g_real_surf, rc);
+      unsigned long me=(unsigned long)pthread_self();
+      /* UM contexto real compartilhado POR THREAD (a Unity passa o MESMO handle p/ varias threads;
+         compartilhar 1 contexto entre threads = BAD_ACCESS). Cada thread cria o seu (share=root)
+         na 1a vez. A thread de SETUP usa PBUFFER, a de RENDER usa o WINDOW. */
+      static _Thread_local void *tl_ctx=NULL;
+      if (!tl_ctx) {
+        int ctxattr[]={0x3098,2,0x3038};
+        tl_ctx = r_createContext(g_real_dpy, g_real_cfg, g_real_ctx, ctxattr);
+        if(!tl_ctx) tl_ctx = (context->real_ctx?context->real_ctx:g_real_ctx);
+      }
+      void *surf = (me==g_creator_tid && g_real_pbuf) ? g_real_pbuf : g_real_surf;
+      r = r_makeCurrent(g_real_dpy, surf, surf, tl_ctx);
+      if (r == 0 && surf!=g_real_surf) { r = r_makeCurrent(g_real_dpy, g_real_surf, g_real_surf, tl_ctx); surf=g_real_surf; }
       has_real_gl = (r != 0);
       static _Thread_local int lg=0;
-      if (r == 0 && lg < 8) { debugPrintf("egl_shim: REAL eglMakeCurrent FALHOU [tid=%lx] err=0x%x\n",
-            (unsigned long)pthread_self(), r_getError?r_getError():0); lg++; }
-      else if (lg < 8) { debugPrintf("egl_shim: REAL eglMakeCurrent OK [tid=%lx] ctx_id=%d\n",
-            (unsigned long)pthread_self(), context->id); lg++; }
+      if (lg < 10) { debugPrintf("egl_shim: REAL MakeCurrent %s [tid=%lx] %s tl_ctx=%p err=0x%x\n",
+            r?"OK":"FALHOU", me, surf==g_real_pbuf?"PBUF":"WIN", tl_ctx, r?0:(r_getError?r_getError():0)); lg++; }
     }
     return EGL_TRUE;
   }
