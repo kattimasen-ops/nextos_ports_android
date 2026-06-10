@@ -6,8 +6,8 @@ CC=$TC/bin/aarch64-libreelec-linux-gnu-gcc
 SR=$TC/aarch64-libreelec-linux-gnu/sysroot
 cd "$(dirname "$0")"
 [ -x "$CC" ] || { echo "toolchain não encontrado: $CC"; exit 1; }
-# inclui egl_shim (janela SDL2); exclui android_shim (NativeActivity) e opensles (audio=depois)
-SRCS=$(ls src/*.c | grep -vE "android_shim|opensles_shim")
+# inclui egl_shim (janela SDL2) + opensles_shim (FMOD audio); exclui android_shim (NativeActivity)
+SRCS=$(ls src/*.c | grep -vE "android_shim")
 $CC --sysroot="$SR" -D_GNU_SOURCE -I src -I "$SR/usr/include" -O2 -fPIC -fno-omit-frame-pointer -rdynamic \
     -o cuphead $SRCS \
     -lSDL2 -ldl -lm -lpthread

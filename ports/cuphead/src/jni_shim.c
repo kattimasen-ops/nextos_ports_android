@@ -341,7 +341,7 @@ static void *jni_CallObjectMethodV(void *env, void *obj, void *methodID,
         strcmp(nm, "getDataDir") == 0 || strcmp(nm, "getExternalStorageDirectory") == 0 ||
         strcmp(nm, "getPath") == 0 || strcmp(nm, "getAbsolutePath") == 0 ||
         strcmp(nm, "getCanonicalPath") == 0)
-      return make_jstring("/storage/roms/re4-recon/userdata");
+      return make_jstring("/storage/roms/cuphead-recon/userdata");
     /* SharedPreferences.getString(key, default) -> loga a chave + retorna default */
     if (strcmp(nm, "getString") == 0) {
       void *keystr = va_arg(ap, void *);

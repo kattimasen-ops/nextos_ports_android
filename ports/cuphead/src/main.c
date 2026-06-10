@@ -22,15 +22,29 @@
 #include <signal.h>
 #include <ucontext.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <SDL2/SDL.h>
 
 #include "so_util.h"
 #include "imports.h"
 #include "jni_shim.h"
+#include "opensles_shim.h"
 #include "util.h"
 
 #define HEAP_MB 96
+
+/* canary bionic: libunity lê o stack-guard de tpidr_el0+0x28 (TLS_SLOT_STACK_GUARD
+ * do bionic); sob glibc esse offset cai no TLS de outra lib e MUDA em runtime →
+ * __stack_chk_fail espúrio (e o "SEGV após neutralizar" era o no-op retornando em
+ * código adjacente — noreturn). Pad TLS no exe (1º bloco após o TCB de 16B) cobre
+ * offset 16..272 e NUNCA é escrito → slot estável. (causa-raiz achada no Dysmantle) */
+/* = {1} → .tdata: fica ANTES das TLS .tbss do egl_shim (link order) no template,
+ * senão o pad desliza p/ +0x30 e o slot +0x28 cai fora (visto no device). */
+__attribute__((aligned(16))) static _Thread_local char g_bionic_guard_pad[256] = {1};
+
+/* fsync(stderr→debug.log): garante que o log sobrevive a hang/power-cycle */
+static void dbg_sync(void) { fsync(2); }
 
 /* ---------- crash handler (arm64) ---------- */
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
@@ -58,6 +72,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     uintptr_t v = *(uintptr_t *)(sp + k * 8);
     if (v >= tb && v < tb + text_size) { fprintf(stderr, "  libunity+0x%lx\n", v - tb); hits++; }
   }
+  dbg_sync();
   _exit(128 + sig);
 }
 
@@ -77,6 +92,8 @@ static long my_sysconf(int name) {
   return r;
 }
 /* /proc/cpuinfo + /sys/.../cpu: Unity conta cores p/ dimensionar job workers. */
+static int g_dllog;
+static const char *asset_redirect(const char *p, char *buf, size_t bufsz);
 static FILE *my_fopen(const char *p, const char *m) {
   if (p && !strcmp(p, "/proc/meminfo")) {
     FILE *t = tmpfile(); if (t) { fputs("MemTotal:      524288 kB\nMemFree:       262144 kB\nMemAvailable:  262144 kB\n", t); rewind(t); return t; }
@@ -84,29 +101,85 @@ static FILE *my_fopen(const char *p, const char *m) {
   if (p && (!strcmp(p, "/sys/devices/system/cpu/possible") || !strcmp(p, "/sys/devices/system/cpu/present") || !strcmp(p, "/sys/devices/system/cpu/online"))) {
     FILE *t = tmpfile(); if (t) { fputs("0-3\n", t); rewind(t); return t; }
   }
+  char rb[512]; const char *r = asset_redirect(p, rb, sizeof rb);
+  if (r) {
+    if (g_dllog) fprintf(stderr, "[fopen-redir] %s -> %s\n", p, r);
+    return fopen(r, m);
+  }
   return fopen(p, m);
 }
 #define ASSET_BASE_M "/storage/roms/cuphead-recon/"
-static int g_dllog = 0;
+/* redirect genérico de assets: o engine monta paths de dados com bases erradas
+   (APK inexistente, filesdir). Mapeia qualquer tentativa p/ os arquivos REAIS
+   deployados em bin/Data (mesma receita do global-metadata.dat, generalizada:
+   pega o sufixo após "bin/Data/", senão o basename de arquivos conhecidos do
+   engine — globalgamemanagers, level*, sharedassets*, *.assets/.resS/.resource). */
+static const char *asset_redirect(const char *p, char *buf, size_t bufsz) {
+  /* anti-loop: só pula o que JÁ aponta pro alvo (bin/Data real); paths de
+     userdata/ sob a base ainda precisam de redirect (il2cpp/Metadata) */
+  if (!p || !strncmp(p, ASSET_BASE_M "bin/Data/", sizeof(ASSET_BASE_M "bin/Data/") - 1)) return NULL;
+  const char *sub = strstr(p, "bin/Data/");
+  if (sub) {
+    snprintf(buf, bufsz, ASSET_BASE_M "bin/Data/%s", sub + 9);
+    if (access(buf, F_OK) == 0) return buf;
+  }
+  const char *base = strrchr(p, '/'); base = base ? base + 1 : p;
+  if (!strcmp(base, "global-metadata.dat")) {
+    snprintf(buf, bufsz, ASSET_BASE_M "bin/Data/Managed/Metadata/global-metadata.dat");
+    return buf;
+  }
+  /* il2cpp procura <userdata>/il2cpp/Resources/*-resources.dat */
+  if (strstr(base, "-resources.dat")) {
+    snprintf(buf, bufsz, ASSET_BASE_M "bin/Data/Managed/Resources/%s", base);
+    if (access(buf, F_OK) == 0) return buf;
+  }
+  if (!strncmp(base, "level", 5) || !strncmp(base, "sharedassets", 12) ||
+      !strncmp(base, "globalgamemanagers", 18) || strstr(base, ".assets") ||
+      strstr(base, ".resS") || strstr(base, ".resource") ||
+      !strcmp(base, "data.unity3d") || !strcmp(base, "boot.config") ||
+      !strcmp(base, "unity default resources") || !strcmp(base, "unity_builtin_extra")) {
+    snprintf(buf, bufsz, ASSET_BASE_M "bin/Data/%s", base);
+    if (access(buf, F_OK) == 0) return buf;
+    snprintf(buf, bufsz, ASSET_BASE_M "bin/Data/Resources/%s", base);
+    if (access(buf, F_OK) == 0) return buf;
+  }
+  return NULL;
+}
 static int my_open(const char *p, int fl, ...) {
   if (p && !strcmp(p, "/proc/cpuinfo")) {
     FILE *t = tmpfile();
     if (t) { for (int i = 0; i < 4; i++) fprintf(t, "processor\t: %d\nCPU implementer\t: 0x41\nCPU architecture: 8\n\n", i);
       fflush(t); int fd = dup(fileno(t)); fclose(t); lseek(fd, 0, SEEK_SET); return fd; }
   }
-  /* il2cpp abre <data>/Metadata/global-metadata.dat via open() com data path errado
-     (resquicio re4-recon). Redireciona pelo basename p/ o arquivo real deployado. */
-  if (p) {
-    const char *base = strrchr(p, '/'); base = base ? base + 1 : p;
-    if (!strcmp(base, "global-metadata.dat")) {
-      const char *real = ASSET_BASE_M "bin/Data/Managed/Metadata/global-metadata.dat";
-      if (g_dllog) fprintf(stderr, "[open-redir] %s -> %s\n", p, real);
-      return open(real, fl);
-    }
-    if (g_dllog) fprintf(stderr, "[open] %s\n", p);
+  char rb[512];
+  const char *r = asset_redirect(p, rb, sizeof rb);
+  if (r) {
+    if (g_dllog) fprintf(stderr, "[open-redir] %s -> %s\n", p, r);
+    return open(r, fl);
   }
   va_list ap; va_start(ap, fl); int mo = va_arg(ap, int); va_end(ap);
-  return open(p, fl, mo);
+  int fd = open(p, fl, mo);
+  if (g_dllog && p) fprintf(stderr, "[open%s] %s\n", fd < 0 ? "-MISS" : "", p);
+  return fd;
+}
+/* stat/lstat/access com o mesmo redirect — o engine checa existência antes de
+   abrir ("No GlobalGameManagers file" pode vir de um stat, não do open).
+   Layout de struct stat arm64 = kernel em bionic E glibc → pass-through ok. */
+static int my_stat(const char *p, void *st) {
+  char rb[512]; const char *r = asset_redirect(p, rb, sizeof rb);
+  if (r && g_dllog) fprintf(stderr, "[stat-redir] %s -> %s\n", p, r);
+  int rc = stat(r ? r : p, (struct stat *)st);
+  if (g_dllog && rc < 0 && p) fprintf(stderr, "[stat-MISS] %s\n", p);
+  return rc;
+}
+static int my_lstat(const char *p, void *st) {
+  char rb[512]; const char *r = asset_redirect(p, rb, sizeof rb);
+  return lstat(r ? r : p, (struct stat *)st);
+}
+static int my_access(const char *p, int m) {
+  char rb[512]; const char *r = asset_redirect(p, rb, sizeof rb);
+  if (r && g_dllog) fprintf(stderr, "[access-redir] %s -> %s\n", p, r);
+  return access(r ? r : p, m);
 }
 /* __system_property_get: zera value (Unity lê como string null-terminated) */
 static int my_sysprop(const char *name, char *value) { (void)name; if (value) value[0] = 0; return 0; }
@@ -118,9 +191,19 @@ static int my_alog_print(int prio, const char *tag, const char *fmt, ...) {
 static int my_alog_write(int prio, const char *tag, const char *msg) {
   fprintf(stderr, "[ALOG:%d %s] %s\n", prio, tag ? tag : "?", msg ? msg : ""); return 0;
 }
-/* ANativeWindow: Unity espera window !=NULL (nativeRecreateGfxState) senão trava p/ sempre. */
+/* __android_log_vprint é o canal do PLAYER LOG do Unity — jamais stubar */
+static int my_alog_vprint(int prio, const char *tag, const char *fmt, va_list ap) {
+  fprintf(stderr, "[ALOG:%d %s] ", prio, tag ? tag : "?");
+  vfprintf(stderr, fmt, ap); fprintf(stderr, "\n"); return 0;
+}
+/* ANativeWindow: Unity espera window !=NULL (nativeRecreateGfxState) senão trava p/ sempre.
+   Os egl* do libunity são imports PLT que resolvem no libEGL REAL do Mali (dlopen GLOBAL);
+   no fbdev a EGLNativeWindowType é só struct {u16 w, u16 h} → entrega uma DE VERDADE e o
+   Unity cria a window surface direto no fb0 (sem shim). CUP_SHIMEGL=1 volta pro fake int. */
+static struct { unsigned short w, h; } g_fbdev_win = {1280, 720};
 static int g_anw = 0xA11;
-static void *my_aw_fromSurface(void *e, void *s) { (void)e; (void)s; return &g_anw; }
+static void *my_aw_fromSurface(void *e, void *s) { (void)e; (void)s;
+  return getenv("CUP_SHIMEGL") ? (void *)&g_anw : (void *)&g_fbdev_win; }
 static int my_aw_setgeom(void *w, int a, int b, int c) { (void)w; (void)a; (void)b; (void)c; return 0; }
 static int my_aw_getWidth(void *w) { (void)w; return 1280; }
 static int my_aw_getHeight(void *w) { (void)w; return 720; }
@@ -259,10 +342,15 @@ __asm__(
   "  br x17\n"
 );
 extern void onew_spy_tramp(void);
+static char g_dl_sl; /* sentinela do handle de libOpenSLES (FMOD → opensles_shim) */
 static void *my_dlopen(const char *nm, int flag) {
   if (g_dllog) fprintf(stderr, "[dlopen] \"%s\"\n", nm ? nm : "(null)");
   /* il2cpp: nosso modulo ja' carregado (F1). Casa "il2cpp" em qualquer forma. */
   if (nm && strstr(nm, "il2cpp")) { fprintf(stderr, "[DLOPEN] %s -> il2cpp module\n", nm); return &g_dl_il2cpp; }
+  /* FMOD (audio do Unity) faz dlopen("libOpenSLES.so") em runtime. CUP_NOSL=1
+     desliga o shim (volta ao estado imagem-OK: FMOD cai no null output). */
+  if (nm && strstr(nm, "OpenSLES") && !getenv("CUP_NOSL")) {
+    fprintf(stderr, "[DLOPEN] %s -> opensles_shim\n", nm); return &g_dl_sl; }
   if (!nm || !nm[0] || strstr(nm, "libc") || strstr(nm, "libunity") || strstr(nm, "libmain"))
     return &g_dl_self;
   void *h = dlopen(nm, flag); return h ? h : &g_dl_self;
@@ -272,6 +360,21 @@ static void *my_dlsym(void *h, const char *nm) {
   if (g_dllog) fprintf(stderr, "[dlsym] h=%p \"%s\"\n", h, nm);
   if (!strcmp(nm, "glGetString")) return (void *)my_glGetString;
   if (nm[0] == 'e' && nm[1] == 'g' && nm[2] == 'l') { void *p = egl_route(nm); if (p) return p; }
+  /* AUDIO: dlsym do handle de libOpenSLES -> opensles_shim (slCreateEngine + SL_IID_*
+     com as identidades DO SHIM — ele compara ponteiro, receita re4/Dysmantle) */
+  if (h == &g_dl_sl) {
+    if (!strcmp(nm, "slCreateEngine")) return (void *)slCreateEngine_shim;
+    if (!strcmp(nm, "SL_IID_ENGINE")) return (void *)&sl_IID_ENGINE;
+    if (!strcmp(nm, "SL_IID_PLAY")) return (void *)&sl_IID_PLAY;
+    if (!strcmp(nm, "SL_IID_VOLUME")) return (void *)&sl_IID_VOLUME;
+    if (!strcmp(nm, "SL_IID_BUFFERQUEUE") || !strcmp(nm, "SL_IID_ANDROIDSIMPLEBUFFERQUEUE"))
+      return (void *)&sl_IID_BUFFERQUEUE;
+    if (!strcmp(nm, "SL_IID_EFFECTSEND")) return (void *)&sl_IID_EFFECTSEND;
+    if (!strcmp(nm, "SL_IID_ENGINECAPABILITIES")) return (void *)&sl_IID_ENGINECAPABILITIES;
+    if (!strcmp(nm, "SL_IID_ENVIRONMENTALREVERB")) return (void *)&sl_IID_ENVIRONMENTALREVERB;
+    fprintf(stderr, "[DLSYM:SL] %s -> NULL\n", nm);
+    return NULL;
+  }
   /* qualquer simbolo il2cpp_* resolve no modulo il2cpp (qualquer handle) */
   if (!strncmp(nm, "il2cpp", 6) && g_m_il2cpp) {
     so_module *c = so_save(); so_use(g_m_il2cpp);
@@ -384,6 +487,27 @@ extern int my_sigaction();  /* bionic_shims.c (ABI sigset bionic/glibc) */
 int main(int argc, char **argv) {
   (void)argc; (void)argv;
   setvbuf(stdout, NULL, _IONBF, 0); setvbuf(stderr, NULL, _IONBF, 0);
+
+  /* log persistente: stderr -> debug.log (unbuffered + fsync nos marcos =
+     sobrevive a hang/power-cycle do device). CUP_NOLOGFILE=1 desativa. */
+  if (!getenv("CUP_NOLOGFILE")) {
+    int lf = open(ASSET_BASE_M "debug.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (lf >= 0) {
+      printf("stderr -> " ASSET_BASE_M "debug.log\n");
+      dup2(lf, 2); if (lf != 2) close(lf);
+    }
+  }
+
+  /* valida que tpidr_el0+0x28 (canary bionic) caiu DENTRO do nosso pad TLS */
+  { uintptr_t tp; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));
+    uintptr_t slot = tp + 0x28, lo = (uintptr_t)g_bionic_guard_pad;
+    fprintf(stderr, "TLS guard: tpidr=0x%lx slot+0x28=0x%lx pad=[0x%lx..0x%lx] %s (val=0x%lx)\n",
+            (unsigned long)tp, (unsigned long)slot, (unsigned long)lo,
+            (unsigned long)(lo + sizeof(g_bionic_guard_pad)),
+            (slot >= lo && slot + 8 <= lo + sizeof(g_bionic_guard_pad))
+                ? "DENTRO ok" : "FORA (canary instavel!)",
+            *(unsigned long *)slot);
+  }
   struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = on_crash; sa.sa_flags = SA_SIGINFO;
   sigaction(SIGSEGV, &sa, 0); sigaction(SIGBUS, &sa, 0); sigaction(SIGABRT, &sa, 0);
   sigaction(SIGILL, &sa, 0); sigaction(SIGFPE, &sa, 0);
@@ -416,6 +540,9 @@ int main(int argc, char **argv) {
   set_import("sysconf", (void *)my_sysconf);
   set_import("fopen", (void *)my_fopen);
   set_import("open", (void *)my_open);
+  set_import("stat", (void *)my_stat);
+  set_import("lstat", (void *)my_lstat);
+  set_import("access", (void *)my_access);
   set_import("__system_property_get", (void *)my_sysprop);
   set_import("__android_log_print", (void *)my_alog_print);
   set_import("__android_log_write", (void *)my_alog_write);
@@ -450,7 +577,7 @@ int main(int argc, char **argv) {
   patch_got("ANativeWindow_release", (void *)my_aw_noop);
   patch_got("__android_log_print", (void *)my_alog_print);
   patch_got("__android_log_write", (void *)my_alog_write);
-  patch_got("__android_log_vprint", (void *)ndk_stub0);
+  patch_got("__android_log_vprint", (void *)my_alog_vprint);
   /* dl* estavam COMENTADOS em imports.gen.c -> set_import foi no-op e o dlopen@plt
      caiu no glibc REAL (falha ao carregar .so Android). Sem isso o il2cpp nao carrega. */
   patch_got("dlopen", (void *)my_dlopen);
@@ -458,6 +585,12 @@ int main(int argc, char **argv) {
   patch_got("dlerror", (void *)my_dlerror);
   patch_got("dlclose", (void *)my_dlclose);
   patch_got("dladdr", (void *)my_dladdr);
+  /* engine checa existência dos arquivos de dados antes de abrir */
+  patch_got("open", (void *)my_open);
+  patch_got("fopen", (void *)my_fopen);
+  patch_got("stat", (void *)my_stat);
+  patch_got("lstat", (void *)my_lstat);
+  patch_got("access", (void *)my_access);
   /* sensores/looper/profiler google: stub no-op (nao usados no path do gfx) */
   const char *ndk_noop[] = {
     "ALooper_forThread","ALooper_prepare","ASensorManager_getInstance",
@@ -518,6 +651,7 @@ int main(int argc, char **argv) {
   }
   fprintf(stderr, "[F0] === libunity OK ===\n");
   mm_probe("pos-JNI_OnLoad");
+  dbg_sync();
 
   /* ---- F1: carrega libil2cpp.so (2º módulo, lógica C# do jogo) ---- */
   g_m_unity = so_save();
@@ -532,16 +666,22 @@ int main(int argc, char **argv) {
     /* il2cpp abre o global-metadata.dat via open() -> intercepta p/ redirecionar.
        patch_got opera no modulo ATIVO (=il2cpp agora). Tb dlopen/dlsym/log. */
     patch_got("open", (void *)my_open);
+    patch_got("fopen", (void *)my_fopen);
+    patch_got("stat", (void *)my_stat);
+    patch_got("lstat", (void *)my_lstat);
+    patch_got("access", (void *)my_access);
     patch_got("dlopen", (void *)my_dlopen);
     patch_got("dlsym", (void *)my_dlsym);
     patch_got("__android_log_print", (void *)my_alog_print);
     patch_got("__android_log_write", (void *)my_alog_write);
+    patch_got("__android_log_vprint", (void *)my_alog_vprint);
     so_finalize(); so_flush_caches();
     fprintf(stderr, "[F1] libil2cpp init_array...\n");
     so_execute_init_array();
     g_m_il2cpp = so_save();
     fprintf(stderr, "[F1] libil2cpp carregado OK\n");
     mm_probe("pos-init_array-il2cpp");
+    dbg_sync();
   } else {
     fprintf(stderr, "[F1] FALHOU carregar libil2cpp (heap=%p)\n", i2heap);
   }
@@ -552,12 +692,21 @@ int main(int argc, char **argv) {
   extern void *jni_find_native(const char *);
   jni_dump_natives();
 
-  /* ---- F2: janela GLES2 (SDL2/egl_shim) + lifecycle Unity ---- */
-  extern int egl_shim_ensure_current(void);
-  if (SDL_Init(SDL_INIT_VIDEO) != 0) fprintf(stderr, "[F2] SDL_Init: %s\n", SDL_GetError());
-  egl_shim_create_window();
-  egl_shim_ensure_current();   /* deixa o contexto GL current na thread do jogo */
-  fprintf(stderr, "[F2] janela GLES2 criada\n");
+  /* ---- F2: janela GLES2 + lifecycle Unity ----
+     Default = EGL REAL do Mali (Unity cria contexto/surface no fb0 via fbdev_window);
+     CUP_SHIMEGL=1 = caminho antigo SDL2/egl_shim (não usado pelo Unity: egl* é PLT). */
+  if (getenv("CUP_SHIMEGL")) {
+    extern int egl_shim_ensure_current(void);
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) fprintf(stderr, "[F2] SDL_Init: %s\n", SDL_GetError());
+    egl_shim_create_window();
+    egl_shim_ensure_current();   /* deixa o contexto GL current na thread do jogo */
+    fprintf(stderr, "[F2] janela GLES2 criada (egl_shim/SDL2)\n");
+  } else {
+    /* áudio (opensles_shim usa SDL_OpenAudioDevice) */
+    if (SDL_Init(SDL_INIT_AUDIO) != 0) fprintf(stderr, "[F2] SDL_Init(AUDIO): %s\n", SDL_GetError());
+    fprintf(stderr, "[F2] EGL REAL Mali fbdev (fbdev_window %ux%u)\n",
+            g_fbdev_win.w, g_fbdev_win.h);
+  }
 
   static long thiz = 0xA1, ctx = 0xC0, surf = 0x5F;
   void *fn;
@@ -566,6 +715,7 @@ int main(int argc, char **argv) {
     ((void (*)(void *, void *, void *))fn)(env, &thiz, &ctx);
     fprintf(stderr, "[F2] initJni OK\n");
     mm_probe("pos-initJni");
+    dbg_sync();
   }
   if ((fn = jni_find_native("nativeRecreateGfxState"))) {
     mm_probe("pre-RecreateGfxState");
@@ -596,17 +746,20 @@ int main(int argc, char **argv) {
     ((void (*)(void *, void *, int, void *))fn)(env, &thiz, 0, &surf);
     fprintf(stderr, "[F2] nativeRecreateGfxState OK\n");
     mm_probe("pos-RecreateGfxState");
+    dbg_sync();
   }
   if ((fn = jni_find_native("nativeResume"))) ((void (*)(void *, void *))fn)(env, &thiz);
   if ((fn = jni_find_native("nativeFocusChanged"))) ((void (*)(void *, void *, int))fn)(env, &thiz, 1);
 
   void *render = jni_find_native("nativeRender");
   fprintf(stderr, "[F2] nativeRender=%p -> loop\n", render);
-  for (int f = 0; render && f < 600; f++) {
+  int max_f = getenv("CUP_FRAMES") ? atoi(getenv("CUP_FRAMES")) : 600;
+  for (int f = 0; render && (max_f <= 0 || f < max_f); f++) {
     ((unsigned char (*)(void *, void *))render)(env, &thiz);
-    if (f < 5 || f % 60 == 0) fprintf(stderr, "[render %d]\n", f);
+    opensles_shim_pump_callbacks();
+    if (f < 5 || f % 60 == 0) { fprintf(stderr, "[render %d]\n", f); dbg_sync(); }
   }
   fprintf(stderr, "[F2] === render loop terminou ===\n");
-  fflush(stderr);
+  fflush(stderr); dbg_sync();
   _exit(0);  /* hard exit — destrutores do .so crasham no teardown normal */
 }
