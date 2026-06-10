@@ -53,11 +53,29 @@ Em `src/imports.c` + `src/main.c`:
 - crash_handler robusto: regiões de TODOS os módulos (maps), hexdump @PC só se mapeado (g_pc_mapped),
   stack scan resolve retornos em qualquer região r-x.
 
-### PRÓXIMOS PASSOS (atacar a CAUSA-RAIZ, não os sintomas)
-1. **🔑 TESTAR NFS_SKIPCTOR**: hoje pula ctors 186/187/188 (crashavam no init). Se um deles inicializa
-   o **registro de tipos / alocador de assets / RTTI**, pular deixa o sistema de tipos sem bootstrap →
-   typeinfos lixo. Desmontar os 3 ctors (offsets no `.init_array`; usar NFS_INITDBG p/ logar por ctor)
-   e ver o que fazem. Tentar fixar o crash deles (em vez de pular) — pode ser a causa-raiz inteira.
+### 🔑 LEAD MAIS FORTE — ctor 186 (CPU feature detection) PULADO (investigado nesta sessão)
+init_array tem 189 ctors (0-188); **186/187/188 são os 3 ÚLTIMOS** (init de subsistemas do app).
+- **ctor 186 @ libapp+0x7433c = DETECÇÃO DE CPU** (ARM mode): instala sigaction(SIGILL)+sigsetjmp e/ou
+  lê getauxval p/ montar flags de feature (AES/PMULL/SHA/CRC32) num global, e seleciona rotinas
+  otimizadas por feature.
+- Por que crasha (e era pulado): **PC=0xba (SIGILL), chama um ponteiro de função LIXO (0xba)** —
+  provável rotina feature-selected (CRC32/hash/memcpy HW) cujo ponteiro não foi setado.
+- Já tentei: **getauxval shim** força AT_HWCAP bit 0x1000 (NFS_NOAUXHACK desliga) → ctor 186 PEGA o
+  caminho sem-probe (lê HWCAP2=0x1f real: AES/PMULL/SHA1/SHA2/CRC32) — CONFIRMADO via log — **mas
+  AINDA crasha em 0xba**. Então o 0xba não é o probe SIGILL; é uma chamada indireta depois das flags.
+- Também: nosso init-recovery (so_execute_init_array+crash_handler) só auto-pula SIGSEGV/SIGBUS, NÃO
+  SIGILL → por isso 186 precisa de SKIPCTOR explícito (a recovery não o pega).
+- **HIPÓTESE-CHAVE (testar)**: a engine usa **CRC32/hash de HARDWARE** (feature ARMv8) p/ o hash dos
+  NOMES de asset no índice do OBB. Com ctor 186 pulado, o ponteiro da rotina de hash fica lixo (ou cai
+  num default que calcula hash DIFERENTE) → lookups de asset acham offsets ERRADOS → objetos
+  construídos sobre bytes errados → typeinfos/vtables lixo ("HT=1"). Isso LIGA ctor 186 à corrupção.
+- **Próximo passo concreto**: desmontar de 74538 até o fim de ctor 186 (e o que ele chama) p/ achar
+  ONDE o ponteiro 0xba é carregado/chamado e qual tabela/rotina ele seleciona. Consertar esse ponteiro
+  (ou prover a rotina) → rodar 186 → ver se a corrupção de asset SOME. Ferramenta: `objdump -d
+  --start-address=0x74538 --stop-address=0x74630 libapp.so` (ARM). Os literais PC-rel estão em
+  0x74604-0x7461c.
+
+### OUTROS PRÓXIMOS PASSOS
 2. **Achar a leitura de estrutura errada**: "HT=1" vem do OBB. Hookar a alocação/construção do objeto
    corrompido e ver de qual offset do arquivo os bytes vêm. Cadeia de chamada (da pilha):
    `0x46afe0 ← 0x3de064 ← 0x46b958 ← 0x43c6fc ← 0x5643cc ← 0x466f28 ← 0x3eabdc ← 0x3d4808 ← 0x75e54`

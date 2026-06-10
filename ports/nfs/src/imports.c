@@ -337,6 +337,19 @@ fail:
   return 0;
 }
 
+/* ---- getauxval: o ctor 186 (detecção de CPU) usa AT_HWCAP bit 0x1000 como gate
+ * "ler features via getauxval" vs "PROBAR instrução (SIGILL)". O probe SIGILL não
+ * sobrevive sob o loader → ctor crasha (por isso era pulado). Forçando bit 0x1000
+ * no AT_HWCAP, o ctor lê features do AT_HWCAP2 (reais) e NÃO proba → completa.
+ * NFS_NOAUXHACK=1 desliga. */
+static unsigned long (*real_getauxval)(unsigned long);
+static unsigned long my_getauxval(unsigned long t) {
+  if (!real_getauxval) real_getauxval = (unsigned long (*)(unsigned long))dlsym(RTLD_DEFAULT, "getauxval");
+  unsigned long v = real_getauxval ? real_getauxval(t) : 0;
+  if (t == 16 /*AT_HWCAP*/ && !getenv("NFS_NOAUXHACK")) v |= 0x1000;
+  return v;
+}
+
 /* ---- stubs ---- */
 static int b_dso_handle;                       /* __dso_handle = endereço dummy */
 static void *b_cxa_type_match(void *a, void *b, char c) { (void)a; (void)b; (void)c; return (void *)0; }
@@ -401,6 +414,7 @@ DynLibFunction nfs_shims[] = {
     {"__cxa_type_match", (uintptr_t)b_cxa_type_match},
     {"sigsetjmp", (uintptr_t)__sigsetjmp},
     {"__dynamic_cast", (uintptr_t)my_dynamic_cast},
+    {"getauxval", (uintptr_t)my_getauxval},
     {"AndroidBitmap_getInfo", (uintptr_t)abm_getInfo},
     {"AndroidBitmap_lockPixels", (uintptr_t)abm_lock},
     {"AndroidBitmap_unlockPixels", (uintptr_t)abm_unlock},
