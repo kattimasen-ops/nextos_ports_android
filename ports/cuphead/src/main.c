@@ -163,9 +163,15 @@ static int g_skipbad = 0;  /* lido 1× no startup (getenv não é async-signal-s
 void gc_suspend_handler(int sig);
 void gc_suspend_handler(int sig) {
   (void)sig;
-  sigset_t m; sigfillset(&m);
-  sigdelset(&m, SIGXCPU); sigdelset(&m, SIGSEGV); sigdelset(&m, SIGBUS);
-  sigsuspend(&m);   /* retorna quando SIGXCPU (restart) chega */
+  /* CUP_GCSUSP=wait: protocolo real (suspende até SIGXCPU). Default: RETORNA imediato
+     (não suspende) — o stop-the-world do GC está quebrado (handler corrompido) e nunca
+     manda o restart, então suspender CONGELA a render. Retornar deixa a thread seguir
+     (coleta vira racy, mas a render avança → imagem). */
+  if (getenv("CUP_GCSUSP")) {
+    sigset_t m; sigfillset(&m);
+    sigdelset(&m, SIGXCPU); sigdelset(&m, SIGSEGV); sigdelset(&m, SIGBUS);
+    sigsuspend(&m);
+  }
 }
 void gc_restart_handler(int sig);
 void gc_restart_handler(int sig) { (void)sig; }
