@@ -115,12 +115,15 @@ static int load_module(const char *name, int heap_mb, int snapshot) {
   /* roda os construtores C++ estáticos (.init_array) deste módulo — necessário
    * antes de usar a engine (inicializa globais/singletons). Ordem = ordem de
    * carga (libc++ 1º). NFS_SKIPINIT="lib..." pula p/ bissecção de corrupção. */
+  /* init_array (construtores C++): DEFAULT-OFF — os construtores do NFS
+   * corrompem o heap/segfaltam sem o ambiente bionic completo (TODO F2.x:
+   * rodar de forma segura). NFS_INIT=1 liga; NFS_SKIPINIT="lib..." filtra. */
   const char *skip = getenv("NFS_SKIPINIT");
-  if (skip && strstr(skip, name)) {
-    debugPrintf("%s: init_array PULADO (NFS_SKIPINIT)\n", name);
-  } else {
+  if (getenv("NFS_INIT") && !(skip && strstr(skip, name))) {
     so_execute_init_array();
     debugPrintf("%s: init_array OK\n", name);
+  } else {
+    debugPrintf("%s: init_array OFF\n", name);
   }
   return 0;
 }
