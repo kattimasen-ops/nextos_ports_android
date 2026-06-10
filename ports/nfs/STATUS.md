@@ -120,3 +120,13 @@
   snapshot libc++ ou pro libstdc++ (grep UNRESOLVED + comparar endereços); (2) forçar as vtables
   iostream do snapshot na tabela; (3) instrumentar 0x624a40/0x626e50 (criação do objeto). Maps
   lookup no crash handler já mostra PC/LR por módulo.
+
+## F4 — relocações DESCARTADAS (todas aplicadas)
+- libapp usa relocações PADRÃO (DT_REL 388264B=48533 relocs, REL não-RELA, não-Android-packed).
+  A seção .rel.dyn cobre os 388264B completos → so_relocate (que itera .rel.dyn/.rel.plt) aplica
+  TODAS. Vtables (.data.rel.ro) relocadas OK. NÃO é relocação faltando.
+- Logo o objeto garbage é genuíno do parse: objeto alocado-mas-não-construído (vtable=lixo do
+  malloc), OU asset não-encontrado no OBB → objeto lixo retornado → assert/crash ao usar/destruir.
+- PRÓXIMO: instrumentar o parse (qual asset/nome a engine procura e não acha; ver se o índice do
+  OBB é lido certo; checar se falta um arquivo além do OBB — só 1 fopen). Possível: a engine espera
+  um 2º arquivo (patch obb / config) ou o índice do OBB precisa de outro parse.
