@@ -29,6 +29,7 @@ void so_free_temp(void);
 int so_load(const char *filename, void *base, size_t max_size);
 int so_relocate(void);
 int so_resolve(DynLibFunction *funcs, int num_funcs, int taint_missing_imports);
+DynLibFunction *so_snapshot_symbols(int *out_count);
 void so_execute_init_array(void);
 uintptr_t so_find_addr(const char *symbol);
 uintptr_t so_find_addr_safe(const char *symbol);

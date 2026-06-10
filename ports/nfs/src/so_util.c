@@ -10,6 +10,7 @@
  *   - hook_arm (ARM + Thumb) em vez de hook_arm64
  */
 #include <assert.h>
+#include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
 #include <malloc.h>
@@ -331,6 +332,40 @@ int so_relocate(void) {
   return 0;
 }
 
+/* captura os símbolos EXPORTADOS (definidos, GLOBAL/WEAK) do módulo carregado
+ * AGORA numa tabela DynLibFunction (nome→endereço resolvido). Usado p/ resolver
+ * módulos posteriores contra este (ex: libapp resolve std::__ndk1 da libc++).
+ * Cada módulo deve estar no seu próprio heap (não sobrescrever) p/ os ponteiros
+ * de nome (na .dynstr do módulo) seguirem válidos. */
+DynLibFunction *so_snapshot_symbols(int *out_count) {
+  int n = 0;
+  for (int i = 0; i < num_syms; i++) {
+    if (syms[i].st_shndx == SHN_UNDEF || syms[i].st_value == 0 ||
+        syms[i].st_name == 0)
+      continue;
+    int bind = ELF32_ST_BIND(syms[i].st_info);
+    if (bind != STB_GLOBAL && bind != STB_WEAK)
+      continue;
+    n++;
+  }
+  DynLibFunction *tbl = malloc(sizeof(DynLibFunction) * (n > 0 ? n : 1));
+  if (!tbl) { if (out_count) *out_count = 0; return NULL; }
+  int k = 0;
+  for (int i = 0; i < num_syms; i++) {
+    if (syms[i].st_shndx == SHN_UNDEF || syms[i].st_value == 0 ||
+        syms[i].st_name == 0)
+      continue;
+    int bind = ELF32_ST_BIND(syms[i].st_info);
+    if (bind != STB_GLOBAL && bind != STB_WEAK)
+      continue;
+    tbl[k].symbol = dynstrtab + syms[i].st_name;
+    tbl[k].func = (uintptr_t)load_base + syms[i].st_value;
+    k++;
+  }
+  if (out_count) *out_count = k;
+  return tbl;
+}
+
 int so_resolve(DynLibFunction *funcs, int num_funcs,
                int taint_missing_imports) {
   for (int i = 0; i < elf_hdr->e_shnum; i++) {
@@ -357,6 +392,14 @@ int so_resolve(DynLibFunction *funcs, int num_funcs,
                 found = 1;
                 break;
               }
+            }
+            if (!found) {
+              /* fallback: resolve da glibc/libs linkadas no loader (libc, m,
+               * dl, pthread, SDL2, EGL, GLESv2) — cobre os ~188 libc/GLES
+               * triviais sem listar cada um. A TABELA tem prioridade (shims
+               * nossos vencem); só cai aqui o que a tabela não tem. */
+              void *p = dlsym(RTLD_DEFAULT, name);
+              if (p) { *ptr = (uintptr_t)p; found = 1; }
             }
             if (!found)
               fprintf(stderr,

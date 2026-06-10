@@ -24,8 +24,8 @@
 - Específicos a tratar: `AndroidBitmap_*` (libjnigraphics), `FMOD_*` (áudio), dlopen/dlsym (nossa versão do loader).
 
 ## Roadmap (fases, estilo DYSMANTLE)
-- [ ] **F0 — build:** loader armhf (so_util REL do gtavc-build) + wire dos 188 (libc→glibc), compila.
-- [ ] **F1 — load:** carrega libapp+libNimble+deps, relocs OK, JNI_OnLoad roda sem crash.
+- [x] **F0 — build:** loader armhf (so_util REL do gtavc-build) + wire dos 188 (libc→glibc), compila.
+- [x] **F1 — load:** libapp+libc++_shared+libNimble+FMOD multi-modulo, so_snapshot_symbols+fallback dlsym, 0 UNRESOLVED, JNI_OnLoad+nativeOnCreate achados. ✅ carrega libapp+libNimble+deps, relocs OK, JNI_OnLoad roda sem crash.
 - [ ] **F2 — boot JNI:** replicar GameActivityMain.nativeOnCreate + JNI env (igual DYSMANTLE GameActivity struct). Pegar o init da engine.
 - [ ] **F3 — GLES2/EGL:** EGL→SDL2 Mali fbdev, contexto GLES2, primeiro frame.
 - [ ] **F4 — dados:** montar o OBB (623MB) no path que a engine espera.
