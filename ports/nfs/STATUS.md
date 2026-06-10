@@ -84,3 +84,23 @@
   (2) o que a thread deref nula em +0x8; (3) talvez adiar/bloquear as threads até nativeOnCreate,
   ou prover o global. Nível engine-comercial (DYSMANTLE/Hollow Knight). Estado DEFAULT estável
   (boot+JNI_OnLoad) preservado.
+
+## F4 — ENGINE LÊ/PARSEIA O OBB! Frontier = objeto garbage no parse de asset
+**PROGRESSO ENORME (do zero ao loading de assets):**
+- ✅ softfp ABI shim (RE4): modf/math crashes resolvidos (+log10f e variantes f). A engine é
+  SOFTFP (vmov r0,r1,d10 antes de bl modf); glibc é HARDFP → wrappers pcs("aapcs").
+- ✅ jni_shim: cadeia File→getAbsolutePath, DisplayMetrics (widthPixels=1280/heightPixels=720 via
+  GetIntField/GetFloatField), getObbFullPath, isObbAssets→1, getPackageName, getFilesDir.
+- ✅ **OBB ABRE e a engine LÊ/PARSEIA** (fread header 1028B + parse byte-a-byte dos nomes de asset).
+- ✅ render loop roda (tick recovery) + janela SDL2 1280x720 Mali fbdev.
+- ⚠️ **MURO: durante o parse de asset, a engine cria um OBJETO GARBADE** (ponteiro wild) e ao
+  destruí-lo (refcount→0, blx vtable[1]) crasha em memcpy(0,tid,11). Cascata: recuperar uma cópia
+  leva à próxima (objeto todo é lixo). mIAssetV/mTextureV ficam vazios → tela preta.
+  Frontier em libapp+0x47a920 (release-refcounted) ← 0x624a98 ← 0x4c971c.
+- HIPÓTESE p/ o objeto garbage: ABI softfp num campo de struct do asset-dir, OU detalhe de ABI
+  libc++ (shared_ptr/string control block), OU leitura de tamanho/contagem com endian/softfp errado
+  no parse. PRÓXIMO: instrumentar o parse (0x4c971c/0x624a98), ver o objeto sendo criado; comparar
+  com mais softfp (sincos? __aeabi float helpers?); checar se mais funções math via ponteiro.
+- Flags de teste: NFS_INIT=1 NFS_SKIPCTOR="186,187,188" + NFS_TICKRECOVER/NFS_FOPENLOG/NFS_PTLOG/
+  NFS_DLSYMLOG/NFS_NORECOVER. Hooks: pthread(NULL-attr) fopen open fread dlsym(softfp). OBB em
+  /storage/roms/nfs/data/Android/obb/<pkg>/main.1003128.<pkg>.obb (623MB, deployado).

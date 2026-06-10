@@ -43,6 +43,20 @@ static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     siglongjmp(g_init_jmp, 1);
   }
 
+  /* 🩹 recupera o memcpy/op com DESTINO NULO e n pequeno (padrão recorrente da
+   * engine: destrutor de objeto garbage no parse de asset) — "retorna" da função
+   * que crashou (PC←LR) pulando a cópia, p/ a engine seguir. NFS_NORECOVER=1 off. */
+  if (sig == SIGSEGV && !getenv("NFS_NORECOVER")) {
+    uintptr_t r0 = m->arm_r0, r2 = m->arm_r2;
+    static int recov = 0;
+    if (r0 < 0x10000 && r2 <= 64 && lr > 0x10000 && recov < 200000) {
+      m->arm_r0 = lr; m->arm_pc = lr; recov++; /* r0=retorno(dst), pc=lr */
+      if (recov <= 4) fprintf(stderr, "[RECOVER] copy dst=%lx n=%lx -> skip (pc<-lr)\n",
+                              (unsigned long)r0, (unsigned long)r2);
+      return;
+    }
+  }
+
   fprintf(stderr, "\n=== CRASH sig=%d addr=%p ===\n", sig, (void *)fault);
   fprintf(stderr, "  PC=%p", (void *)pc);
   if (pc >= text && pc < text + text_size)

@@ -28,7 +28,8 @@ W1D(cosh) W1D(sinh) W1D(tanh)
 W1D(exp) W1D(exp2) W1D(log) W1D(log10) W1D(sqrt)
 W1D(ceil) W1D(floor) W1D(round) W1D(trunc) W1D(rint)
 W1F(acosf) W1F(asinf) W1F(atanf) W1F(cosf) W1F(sinf) W1F(tanf)
-W1F(expf) W1F(logf) W1F(sqrtf) W1F(fabsf) W1F(ceilf) W1F(floorf) W1F(roundf) W1F(truncf)
+W1F(expf) W1F(logf) W1F(log10f) W1F(log2f) W1F(exp2f) W1F(sqrtf) W1F(cbrtf) W1F(fabsf)
+W1F(ceilf) W1F(floorf) W1F(roundf) W1F(truncf) W1F(rintf) W1F(sinhf) W1F(coshf) W1F(tanhf)
 W2D(atan2) W2D(fmod) W2D(pow) W2D(remainder)
 W2F(atan2f) W2F(fmodf) W2F(powf)
 
@@ -45,7 +46,9 @@ static const struct sfent SFTAB[] = {
   {"exp",sf_exp},{"exp2",sf_exp2},{"log",sf_log},{"log10",sf_log10},{"sqrt",sf_sqrt},
   {"ceil",sf_ceil},{"floor",sf_floor},{"round",sf_round},{"trunc",sf_trunc},{"rint",sf_rint},
   {"acosf",sf_acosf},{"asinf",sf_asinf},{"atanf",sf_atanf},{"cosf",sf_cosf},{"sinf",sf_sinf},{"tanf",sf_tanf},
-  {"expf",sf_expf},{"logf",sf_logf},{"sqrtf",sf_sqrtf},{"fabsf",sf_fabsf},
+  {"expf",sf_expf},{"logf",sf_logf},{"log10f",sf_log10f},{"log2f",sf_log2f},{"exp2f",sf_exp2f},
+  {"sqrtf",sf_sqrtf},{"cbrtf",sf_cbrtf},{"fabsf",sf_fabsf},{"rintf",sf_rintf},
+  {"sinhf",sf_sinhf},{"coshf",sf_coshf},{"tanhf",sf_tanhf},
   {"ceilf",sf_ceilf},{"floorf",sf_floorf},{"roundf",sf_roundf},{"truncf",sf_truncf},
   {"atan2",sf_atan2},{"fmod",sf_fmod},{"pow",sf_pow},{"remainder",sf_remainder},
   {"atan2f",sf_atan2f},{"fmodf",sf_fmodf},{"powf",sf_powf},

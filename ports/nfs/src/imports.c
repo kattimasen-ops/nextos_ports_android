@@ -118,6 +118,14 @@ static void *my_fopen(const char *path, const char *mode) {
   }
   return fp;
 }
+static size_t (*real_fread)(void *, size_t, size_t, void *);
+static size_t my_fread(void *p, size_t sz, size_t n, void *fp) {
+  if (!real_fread) real_fread = (size_t(*)(void*,size_t,size_t,void*))dlsym(RTLD_DEFAULT, "fread");
+  size_t r = real_fread(p, sz, n, fp);
+  if (getenv("NFS_FOPENLOG")) { static int c = 0; static size_t tot = 0; tot += r * sz;
+    if (c < 30) { fprintf(stderr, "[fread] %zu*%zu -> %zu (fp=%p, total=%zu)\n", sz, n, r, fp, tot); c++; } }
+  return r;
+}
 static int (*real_open)(const char *, int, ...);
 static int my_open(const char *path, int flags, ...) {
   if (!real_open) real_open = (int (*)(const char *, int, ...))dlsym(RTLD_DEFAULT, "open");
@@ -180,6 +188,7 @@ DynLibFunction nfs_shims[] = {
     {"pthread_create", (uintptr_t)my_pthread_create},
     {"dlsym", (uintptr_t)my_dlsym},
     {"fopen", (uintptr_t)my_fopen},
+    {"fread", (uintptr_t)my_fread},
     {"open", (uintptr_t)my_open},
     {"malloc", (uintptr_t)pad_malloc},
     {"calloc", (uintptr_t)pad_calloc},
