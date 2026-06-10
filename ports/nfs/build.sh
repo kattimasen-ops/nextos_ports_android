@@ -2,7 +2,7 @@
 # build ARMHF do NFS Most Wanted so-loader — toolchain NextOS Amlogic-old (armhf).
 # glibc 2.43 + SDL2/EGL/GLESv2 do sysroot = BATEM com o device (runtime /usr/lib32).
 set -e
-TC=~/NextOS-Elite-Edition/build.NextOS-Retro-Elite-Edition-Amlogic-old.aarch64-4/toolchain
+TC=$(ls -d ~/NextOS-Elite-Edition/build*Amlogic-old*/toolchain 2>/dev/null | head -1)
 CC=$TC/bin/armv8a-emuelec-linux-gnueabihf-gcc
 SR=$TC/armv8a-emuelec-linux-gnueabihf/sysroot
 cd "$(dirname "$0")"
