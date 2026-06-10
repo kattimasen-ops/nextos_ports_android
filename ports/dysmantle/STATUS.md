@@ -32,20 +32,32 @@ Device: Amlogic-old (S905X, Mali-450 Utgard, GLES2, fbdev), nextos-87.
 - **NXI_GetProductValue("opengl_version")** GOT-hook → "2.0" (caminho ES2).
 - **nx_run_no_popups=1** + NXD_ShowPopup no-op + ImageWriterJPEG::Initialize=0 (anti-crash falha textura).
 
-### 🧱 MURO ATUAL — crash na worker thread de loading (textura grunge corrompida)
-`ScreenLoading_LoadingThread` (worker thread async, pthread_create + NXTI_InitializeThread +
-nx_thread_state TLS) carrega os recursos. A textura **`ui/gfx/textures/grunge-scratched.jpg`**
-lê dados decodificados `0xff 0xd9` (JPEG EOI/vazio) = **asset corrompido/stripado no APK modado**
-("JpegImageLoader: Not a JPEG file: starts with 0xff 0xd9"). A engine loga "Loading bitmap failed"
-e a thread crasha logo depois (SIGSEGV em memcpy/nString — tratamento da falha OU parse do
-próximo recurso). A maioria das texturas carrega (ffffff00), só grunge falha → é específico.
+### ✅ TEXTURAS RESOLVIDAS (ETC2→JPEG/PNG) + 🧱 MURO = compilador Squirrel (autoexec.nut)
 
-### PRÓXIMOS PASSOS
-1. Tornar a falha do bitmap graciosa: patchar BitmapLoader/JpegImageLoader p/ devolver textura
-   dummy 1x1 em vez de falhar (a falha cascateia no crash). Achar a função que decide o erro.
-2. OU prover dados válidos p/ grunge (asset corrompido) — mas é pós-decompressão (zlib estático),
-   difícil interceptar.
-3. Investigar TLS da worker thread (nx_thread_state via __emutls_get_address/libgcc).
+**TEXTURAS (resolvido):** o APK modado "APK_Award" tem os JPEG/PNG de UI com **size=0** (vazios),
+só a versão **`.ktx` (ETC2_RGB8, glInternalFormat=0x9274 = GLES3)**. Mali-450 Utgard é GLES2
+(sem ETC2) → a engine cai no .jpg/.png vazio → "Not a JPEG: starts with 0xff 0xd9". `NX_Graphics_
+IsTextureFormatSupported`→1 NÃO redireciona (a engine escolhe .jpg por GL caps). **FIX = decodificar
+os ETC2 KTX → JPEG/PNG no PC e preencher os slots vazios no pak** (`tools/fix_empty_textures.py`,
+usa texture2ddecoder+PIL). data.pak (primário): 466 .jpg in-place + 3 .jpg + 70 .png anexados.
+grunge passou (carrega JPEG real 1024x1024, ver tools/grunge_decoded_proof.jpg). Formato pak:
+magic"PAK\0V11\0"(8)+idx_offset(u32)+filesize(u32); índice = nome\0+offset+size+hash+pad (4×u32).
+In-place (sobrescreve slot .ktx, mesmo offset) OU anexa (move índice). Paks corrigidos em stage/assets/.
+
+**🧱 MURO ATUAL = compilador SQUIRREL crasha compilando `autoexec.nut`.** BRK-trap em sq_compile
+(0x64454c) revelou: o 1º script `autoexec.nut` (sourcename) crasha no lexer ao criar o token da
+string literal **"UI AUTOEXEC"** (exatamente **11 chars = n do memcpy**). Crash = `memcpy(dst=NULL,
+src=0x2964, n=11)` na worker thread (`ScreenLoading_LoadingThread`). Stack: SQLexer::ReadNumber /
+SQCompiler::ShiftExp / SQFuncState::GetConstant/PushTarget / SQString. dst=NULL + src=ponteiro
+**truncado/uninit (~0x2900, varia por run)** = **SQLexer._longstr (sqvector) NÃO inicializado**
+e/ou string-table do SQSharedState NULL → **VM/compilador Squirrel mal-construído na worker thread**.
+(grunge era red herring — o crash sempre foi o Squirrel, logado logo após o erro da grunge.)
+
+### PRÓXIMOS PASSOS (muro Squirrel)
+1. Investigar a criação do VM Squirrel (sq_open/NX wrapper): SQSharedState/string-table/_longstr
+   uninit → ver se falta função stub, ou se é construção C++ (operator new/ctor) na worker thread.
+2. Conferir se SQCompiler/SQLexer roda construído (ctor) vs malloc cru; checar ABI sqvector.
+3. Comparável a [[project_hollow_knight_unity_soloader_mali450]] em profundidade.
 
 ## Build / Deploy / Teste
 `cd ports/dysmantle && ./build.sh` → `scp dysmantle nextos-87:/storage/roms/dysmantle/`.

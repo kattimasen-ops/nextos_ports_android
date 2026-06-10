@@ -59,15 +59,7 @@ static int    b_sys_prop_get(const char *name, char *value) {
   (void)name; if (value) value[0] = '\0'; return 0;
 }
 /* __emutls_get_address vem do libgcc (linkado estático no loader). */
-extern void *__emutls_get_address_real(void *) __asm__("__emutls_get_address");
-static void *__emutls_get_address(void *c) {
-  void *r = __emutls_get_address_real(c);
-  static int n = 0;
-  if ((uintptr_t)r < 0x10000 && n < 10) {
-    fprintf(stderr, "[EMUTLS] control=%p -> r=%p (SUSPEITO!)\n", c, r); n++;
-  }
-  return r;
-}
+extern void *__emutls_get_address(void *);
 
 /* bionic __sF[3] = stdin/out/err (libc++ usa p/ std::cerr/cout). UNRESOLVED ->
  * std::cerr na cadeia de erro do bitmap -> PLT loop/crash. Provemos o array +

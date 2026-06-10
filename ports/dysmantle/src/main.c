@@ -214,18 +214,43 @@ static void arm_brk(uintptr_t vaddr, const char *name) {
   g_brk_n++;
 }
 static volatile uintptr_t g_canary_addr = 0;
+static volatile int g_rearm = -1;        /* índice do brk a re-armar no single-step */
+static int safe_str(uintptr_t p, char *out, int n) {
+  if (p < 0x1000) { out[0] = 0; return 0; }
+  int i = 0; char *s = (char *)p;
+  for (; i < n - 1; i++) { char c = s[i]; if (c == 0) break; out[i] = (c >= 32 && c < 127) ? c : '.'; }
+  out[i] = 0; return i;
+}
 static void brk_handler(int sig, siginfo_t *info, void *uc) {
   (void)sig; (void)info;
   ucontext_t *u = (ucontext_t *)uc;
   uintptr_t pc = u->uc_mcontext.pc;
+  /* single-step após restaurar: re-arma o brk e segue */
+  if (g_rearm >= 0 && pc != g_brk[g_rearm].addr) {
+    int i = g_rearm; g_rearm = -1;
+    uintptr_t a = g_brk[i].addr, pg = a & ~0xFFFUL;
+    mprotect((void *)pg, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
+    *(uint32_t *)a = 0xd4200000;
+    mprotect((void *)pg, 0x2000, PROT_READ | PROT_EXEC);
+    __builtin___clear_cache((char *)a, (char *)a + 4);
+    u->uc_mcontext.pstate &= ~0x200000UL;   /* limpa single-step */
+    return;
+  }
   for (int i = 0; i < g_brk_n; i++) {
     if (g_brk[i].addr == pc) {
       const char *nm = g_brk[i].name;
-      fprintf(stderr, "[BRK] %s  w0=0x%lx\n", nm, (unsigned long)u->uc_mcontext.regs[0]);
+      if (nm[0] == 'S' && nm[1] == 'Q') { /* compile: loga sourcename(x3 p/ buffer, x1 p/ compile)+source */
+        char a1[120], a3[120];
+        safe_str(u->uc_mcontext.regs[1], a1, sizeof(a1));
+        safe_str(u->uc_mcontext.regs[3], a3, sizeof(a3));
+        fprintf(stderr, "[SQ] %s x1=\"%s\" x3=\"%s\"\n", nm, a1, a3);
+      } else {
+        fprintf(stderr, "[BRK] %s  w0=0x%lx\n", nm, (unsigned long)u->uc_mcontext.regs[0]);
+      }
       fflush(stderr);
       uintptr_t pg = pc & ~0xFFFUL;
       mprotect((void *)pg, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC);
-      *(uint32_t *)pc = g_brk[i].orig;   /* restaura -> re-executa (one-shot) */
+      *(uint32_t *)pc = g_brk[i].orig;   /* restaura -> one-shot */
       mprotect((void *)pg, 0x2000, PROT_READ | PROT_EXEC);
       __builtin___clear_cache((char *)pc, (char *)pc + 4);
       return;
@@ -235,11 +260,8 @@ static void brk_handler(int sig, siginfo_t *info, void *uc) {
   _exit(133);
 }
 static void install_brk_traps(void) {
-  arm_brk(0x56b438, "SoundMgr::Initialize");
-  arm_brk(0x56ca34, "CreateImplementation");
-  arm_brk(0x56dbd8, "GetPrimary(Oboe)");
-  arm_brk(0x56cb08, "InitWithFallback");
-  arm_brk(0x56f0b0, "SoundImpOboe::InitializeStream");
+  arm_brk(0x64454c, "SQ_compile");
+  arm_brk(0x667548, "SQ_compilebuffer");
 }
 
 /* GOT-hook de NXI_GetProductValue -> força opengl_version="2.0" (caminho ES2) */
@@ -329,6 +351,12 @@ int main(int argc, char *argv[]) {
   /* ImageWriterJPEG::Initialize: na falha do bitmap a engine tenta cachear via
    * JPEG-encode e crasha (libjpeg). Falha gracioso (return 0) -> pula o cache. */
   patch_func_ret0("_ZN15ImageWriterJPEG10InitializeEv");
+
+  /* 🔑 NX_Graphics_IsTextureFormatSupported -> 1 (true): o APK modado tem os JPEGs
+   * de UI VAZIOS (size 0) e só a versão .ktx (ETC2). A engine, achando que ETC2
+   * não é suportado (Mali-450=GLES2), cai no .jpg vazio -> crash. Forçando
+   * "suportado", carrega o .ktx (TEM dados) via KtxImageLoader -> sem crash. */
+  patch_func_ret1("_Z36NX_Graphics_IsTextureFormatSupportedRK22nx_bitmap_parameters_t");
 
   /* GOT-hook NXI_GetProductValue: a engine lê "opengl_version" do config; se
    * pedir ES3 ela monta o APIManager ES3 (mais funções) num buffer de pilha
