@@ -104,3 +104,19 @@
 - Flags de teste: NFS_INIT=1 NFS_SKIPCTOR="186,187,188" + NFS_TICKRECOVER/NFS_FOPENLOG/NFS_PTLOG/
   NFS_DLSYMLOG/NFS_NORECOVER. Hooks: pthread(NULL-attr) fopen open fread dlsym(softfp). OBB em
   /storage/roms/nfs/data/Android/obb/<pkg>/main.1003128.<pkg>.obb (623MB, deployado).
+
+## F4 — DESCOBERTA: os "crashes" são ASSERTS DELIBERADOS (raise SIGSEGV, si_code=-6)
+- O crash recorrente é `pthread_kill/raise(SIGSEGV)` (libc+0x7c720 = gettid→tgkill(getpid,tid,11)),
+  **si_code=-6 (SI_TKILL)** = a engine RAISA SIGSEGV DE PROPÓSITO nos asserts (debug build, estilo
+  breakpoint de debugger). Crash handler agora IGNORA si_code<=0 (NFS_NOASSERTIGNORE p/ desligar).
+- Mas ignorar o assert → a engine usa o objeto garbage → crash REAL (blx r1 com r1 lixo, 0xe12fff36).
+  Então o assert PROTEGE contra um objeto genuinamente garbage criado no parse de asset.
+- Com assert-ignore + tick-recovery: render loop roda 300 frames, mas assets vazios → tela preta.
+- **HIPÓTESE LÍDER p/ o objeto garbage: ABI libc++ iostream/string.** A engine lê o OBB byte-a-byte
+  (= std::istream::get) e cria objetos. Se uma VTABLE de iostream/streambuf/locale resolveu pra
+  libstdc++ (GNU) em vez da libc++ (LLVM snapshot), ou um símbolo _ZTV* caiu no dlsym errado → ABI
+  divergente → objeto garbage. PRECEDENTE: DYSMANTLE precisou expor basic_filebuf::open do snapshot.
+- **PRÓXIMO:** (1) checar se _ZTVSt*/_ZTVNSt* (vtables iostream) e std::locale/ctype resolveram pro
+  snapshot libc++ ou pro libstdc++ (grep UNRESOLVED + comparar endereços); (2) forçar as vtables
+  iostream do snapshot na tabela; (3) instrumentar 0x624a40/0x626e50 (criação do objeto). Maps
+  lookup no crash handler já mostra PC/LR por módulo.

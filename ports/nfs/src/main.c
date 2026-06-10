@@ -38,6 +38,17 @@ static void crash_handler(int sig, siginfo_t *info, void *uctx) {
 
   /* construtor do init_array crashou (precisa de ambiente bionic indisponível)
    * → pula ele e segue (so_execute_init_array armou o sigsetjmp). */
+  /* 🎯 a engine RAISA SIGSEGV deliberadamente nos ASSERTS (debug build:
+   * pthread_kill/raise como breakpoint de debugger). si_code<=0 = sinal ENVIADO
+   * por tgkill/tkill/user (NÃO um fault de memória real, que é SEGV_MAPERR=1/
+   * ACCERR=2). Ignoramos (return) = "continuar" no assert → a engine segue.
+   * NFS_NOASSERTIGNORE=1 desliga. */
+  if (sig == SIGSEGV && info->si_code <= 0 && !getenv("NFS_NOASSERTIGNORE")) {
+    static int a = 0;
+    if (a < 8) { fprintf(stderr, "[ASSERT-IGNORE] raise(SIGSEGV) deliberado (si_code=%d) -> continua\n", info->si_code); a++; }
+    return;
+  }
+
   if ((sig == SIGSEGV || sig == SIGBUS) && g_init_armed) {
     g_init_armed = 0;
     siglongjmp(g_init_jmp, 1);
@@ -75,6 +86,19 @@ static void crash_handler(int sig, siginfo_t *info, void *uctx) {
           (unsigned long)m->arm_r8, (unsigned long)m->arm_r9,
           (unsigned long)m->arm_r10, (unsigned long)m->arm_fp,
           (unsigned long)m->arm_ip, (unsigned long)m->arm_sp);
+
+  /* qual módulo é o PC e o LR (lê /proc/self/maps) */
+  { FILE *mf = fopen("/proc/self/maps", "r");
+    if (mf) { char ln[512];
+      while (fgets(ln, sizeof(ln), mf)) {
+        unsigned long s, e; char perm[8], path[300]; path[0] = 0;
+        if (sscanf(ln, "%lx-%lx %7s %*x %*s %*d %299s", &s, &e, perm, path) >= 3) {
+          if (pc >= s && pc < e) fprintf(stderr, "  PC em %s + 0x%lx\n", path[0] ? path : "?", pc - s);
+          if (lr >= s && lr < e) fprintf(stderr, "  LR em %s + 0x%lx\n", path[0] ? path : "?", lr - s);
+        }
+      }
+      fclose(mf); }
+  }
 
   /* backtrace simples via FP chain (ARM: [fp-4]=lr salvo, [fp-8]=fp ant.;
    * varia por -fomit-frame-pointer, então é best-effort) */
