@@ -39,6 +39,8 @@ static _Thread_local int has_real_gl = 0;
 SDL_Window *egl_shim_get_window(void) { return egl_window; }
 
 void egl_shim_create_window(void) {
+  if (!SDL_WasInit(SDL_INIT_VIDEO) && SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0)
+    debugPrintf("egl_shim: SDL_Init falhou: %s\n", SDL_GetError());
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);

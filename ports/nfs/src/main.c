@@ -24,9 +24,10 @@
 
 #define MEMORY_MB 64
 #define SO_NAME "libapp.so"
-/* NOTA: NFS usa __stack_chk_guard GLOBAL (resolve p/ o canário do glibc, estável)
- * — NÃO o slot TLS. Logo o pad TLS do DYSMANTLE é desnecessário aqui (e mudava
- * sig11→sig4). Removido. */
+/* 🔑 pad TLS do canary bionic (DYSMANTLE): as render threads batem no padrão
+ * memcpy(0,tid,11) (thread-entry/canary instável sob glibc). Pad _Thread_local
+ * 256B aligned(16) NUNCA escrito cobre o slot bionic e estabiliza. */
+__attribute__((aligned(16))) _Thread_local char g_bionic_guard_pad[256];
 
 /* ---- crash handler ARMHF (campos arm_pc/arm_r0/arm_lr do sigcontext 32-bit) ---- */
 static void crash_handler(int sig, siginfo_t *info, void *uctx) {
@@ -142,6 +143,7 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
   install_crash_handler();
+  __asm__ volatile("" : : "r"(g_bionic_guard_pad) : "memory"); /* força o pad no TLS */
   setvbuf(stdout, NULL, _IONBF, 0); /* logs visíveis no crash (init_array era a causa, não isto) */
   debugPrintf("=== NFS Most Wanted — loader ARMHF (Mali-450) ===\n");
 
@@ -179,17 +181,45 @@ int main(int argc, char *argv[]) {
     debugPrintf("JNI_OnLoad -> 0x%x\n", v);
   }
 
+  static char fake_this[64], fake_surface[64];
+#define NCALL0(sym) do { uintptr_t a = so_find_addr_safe(sym); \
+    if (a) { debugPrintf(">> %s\n", sym); ((void(*)(void*,void*))a)(env, fake_this); } \
+    else debugPrintf("!! %s nao achado\n", sym); } while (0)
+
   if (!getenv("NFS_NO_ONCREATE") && native_oncreate) {
-    /* Java_..._nativeOnCreate(JNIEnv*, jobject thiz, ...). Chamamos com env +
-     * um 'this' fake; args extras = 0 (ajustar conforme a engine pedir). */
     debugPrintf("chamando nativeOnCreate...\n");
-    void (*onCreate)(void *, void *, void *, void *, void *, void *) =
-        (void (*)(void *, void *, void *, void *, void *, void *))native_oncreate;
-    static char fake_this[64];
-    onCreate(env, fake_this, 0, 0, 0, 0);
+    ((void(*)(void*,void*,void*,void*,void*,void*))native_oncreate)(env, fake_this, 0, 0, 0, 0);
     debugPrintf("nativeOnCreate retornou\n");
+
+    /* ---- F3: ciclo de render (GameActivity lifecycle + RunLoop tick) ---- */
+    extern void egl_shim_create_window(void);
+    egl_shim_create_window(); /* SDL2 + EGL/GLES2 no Mali fbdev */
+
+    NCALL0("Java_com_ea_ironmonkey_GameActivityMain_nativeOnStart");
+    /* nativeSurfaceCreated(env, this, surface) — surface fake; a engine pega o
+     * ANativeWindow via ANativeWindow_fromSurface (android_shim) */
+    { uintptr_t a = so_find_addr_safe("Java_com_ea_ironmonkey_GameActivityMain_nativeSurfaceCreated");
+      if (a) { debugPrintf(">> nativeSurfaceCreated\n");
+        ((void(*)(void*,void*,void*))a)(env, fake_this, fake_surface); } }
+    /* nativeSurfaceChanged(env, this, format, w, h) */
+    { uintptr_t a = so_find_addr_safe("Java_com_ea_ironmonkey_GameActivityMain_nativeSurfaceChanged");
+      if (a) { debugPrintf(">> nativeSurfaceChanged 1280x720\n");
+        ((void(*)(void*,void*,int,int,int))a)(env, fake_this, 1, 1280, 720); } }
+    NCALL0("Java_com_ea_ironmonkey_GameActivityMain_nativeOnResume");
+
+    /* loop de render: RunLoop_nativeOnRunLoopTick a cada frame (a engine faz
+     * eglSwapBuffers -> egl_shim -> SDL_GL_SwapWindow) */
+    uintptr_t tick = so_find_addr_safe("Java_com_ea_ironmonkey_RunLoop_nativeOnRunLoopTick");
+    debugPrintf(">> entrando no render loop (tick=%p)\n", (void *)tick);
+    int frames = getenv("NFS_FRAMES") ? atoi(getenv("NFS_FRAMES")) : 600;
+    for (int f = 0; f < frames && tick; f++) {
+      ((void(*)(void*,void*))tick)(env, fake_this);
+      if (f < 5 || f % 60 == 0) debugPrintf("[frame %d]\n", f);
+      usleep(16000);
+    }
+    debugPrintf("=== render loop terminou (%d frames) ===\n", frames);
   }
 
-  debugPrintf("=== F2: boot JNI executado ===\n");
+  debugPrintf("=== F3: render executado ===\n");
   return 0;
 }

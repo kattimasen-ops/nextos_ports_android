@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include "so_util.h"
+#include "egl_shim.h"
 
 /* ---- bionic __sF[3] = stdin/out/err (libc++ usa p/ std::cerr/cout) ---- */
 static char bionic_sF[3][512];
@@ -98,8 +99,11 @@ static int my_pthread_create(void *th, const void *attr, void *(*fn)(void *), vo
   }
   if (getenv("NFS_PTLOG")) {
     static int n = 0;
-    if (n < 40) { fprintf(stderr, "[pthread_create] #%d fn=%p arg=%p\n", n, (void *)fn, arg); n++; }
+    if (n < 40) { fprintf(stderr, "[pthread_create] #%d fn=%p arg=%p attr=%p\n", n, (void *)fn, arg, (void *)attr); n++; }
   }
+  /* IGNORA o attr bionic (layout ≠ glibc → glibc lê lixo de stack-size). Passa
+   * NULL = thread glibc default (8MB). NFS_PT_KEEPATTR=1 mantém o attr original. */
+  if (!getenv("NFS_PT_KEEPATTR")) attr = NULL;
   return real_pthread_create(th, attr, fn, arg);
 }
 
@@ -113,6 +117,28 @@ static int abm_lock(void *env, void *bmp, void **pix) { (void)env; (void)bmp; if
 static int abm_unlock(void *env, void *bmp) { (void)env; (void)bmp; return 0; }
 
 DynLibFunction nfs_shims[] = {
+    /* EGL → SDL2 (Mali fbdev): a engine cria contexto/surface via egl_shim */
+    {"eglGetDisplay", (uintptr_t)egl_shim_GetDisplay},
+    {"eglInitialize", (uintptr_t)egl_shim_Initialize},
+    {"eglTerminate", (uintptr_t)egl_shim_Terminate},
+    {"eglChooseConfig", (uintptr_t)egl_shim_ChooseConfig},
+    {"eglGetConfigAttrib", (uintptr_t)egl_shim_GetConfigAttrib},
+    {"eglCreateWindowSurface", (uintptr_t)egl_shim_CreateWindowSurface},
+    {"eglCreatePbufferSurface", (uintptr_t)egl_shim_CreatePbufferSurface},
+    {"eglDestroySurface", (uintptr_t)egl_shim_DestroySurface},
+    {"eglCreateContext", (uintptr_t)egl_shim_CreateContext},
+    {"eglDestroyContext", (uintptr_t)egl_shim_DestroyContext},
+    {"eglMakeCurrent", (uintptr_t)egl_shim_MakeCurrent},
+    {"eglSwapBuffers", (uintptr_t)egl_shim_SwapBuffers},
+    {"eglSwapInterval", (uintptr_t)egl_shim_SwapInterval},
+    {"eglGetCurrentContext", (uintptr_t)egl_shim_GetCurrentContext},
+    {"eglGetCurrentSurface", (uintptr_t)egl_shim_GetCurrentSurface},
+    {"eglGetError", (uintptr_t)egl_shim_GetError},
+    {"eglQueryString", (uintptr_t)egl_shim_QueryString},
+    {"eglQuerySurface", (uintptr_t)egl_shim_QuerySurface},
+    {"eglBindAPI", (uintptr_t)egl_shim_BindAPI},
+    {"eglSurfaceAttrib", (uintptr_t)egl_shim_SurfaceAttrib},
+    {"eglGetProcAddress", (uintptr_t)egl_shim_GetProcAddress},
     {"pthread_create", (uintptr_t)my_pthread_create},
     {"malloc", (uintptr_t)pad_malloc},
     {"calloc", (uintptr_t)pad_calloc},
