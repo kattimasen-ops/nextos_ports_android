@@ -454,12 +454,14 @@ static unsigned char jni_CallBooleanMethod(void *env, void *obj,
   if (nm) {
     if (strcmp(nm, "isEmpty") == 0) return 1;  /* lista vazia */
     if (strcmp(nm, "hasNext") == 0) return 0;  /* iterator vazio */
-    /* SharedPreferences.contains(key) -> 1 se ARMAZENADO (round-trip do save) */
+    /* SharedPreferences.contains(key) -> 1 se ARMAZENADO (round-trip do save).
+       CUP_NOCONTAINS=1: força false (jogo usa defaults em código, NÃO chama
+       JsonUtility.FromJson<T> do valor salvo — teste se o crash é o genérico FromJson). */
     if (strcmp(nm, "contains") == 0) {
       va_list ap; va_start(ap, methodID);
       void *keyo = va_arg(ap, void *); va_end(ap);
       const char *key = resolve_jstring(keyo);
-      int has = prefs_contains(key);
+      int has = getenv("CUP_NOCONTAINS") ? 0 : prefs_contains(key);
       debugPrintf("[PREFS] contains key='%s' -> %d\n", key, has);
       return (unsigned char)has;
     }
