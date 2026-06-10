@@ -277,6 +277,56 @@ static int ptr_executable(uintptr_t p) {
 uintptr_t g_dyncast_tramp;  /* trampolim p/ rodar o __dynamic_cast original */
 static void *my_dynamic_cast(const void *, const void *, const void *, long);
 
+/* caminha a cadeia de type_info (Itanium ABI) p/ achar a base CORROMPIDA — a que
+ * tem a vtable do type_info fora de qq região executável. Heurística __si vs __vmi:
+ *   __class: vt,name              __si: vt,name,base@8
+ *   __vmi:   vt,name,flags@8,count@12,base_info[]@16 (cada 8B: base@0, offflags@4)
+ * Retorna 1 se achou corrupção. NFS_TICHAIN=1 liga o dump. */
+static const char *ti_name(const void *ti) {
+  if (!mem_readable((const char *)ti + 4, 4)) return "?";
+  const char *n = *(const char *const *)((const char *)ti + 4);
+  return mem_readable(n, 1) ? n : "?";
+}
+/* type_info válido: tem vtable (em .data.rel.ro, pode NÃO ser exec) cujo handler
+ * vt[6] (offset 0x18, o que o dcast faz blx) É código executável. */
+static int ti_ok(const void *ti) {
+  if (!mem_readable(ti, 12)) return 0;
+  uintptr_t vt = *(const uintptr_t *)ti;
+  if (!mem_readable((const void *)(vt + 0x18), 4)) return 0;
+  uintptr_t handler = *(const uintptr_t *)(vt + 0x18);
+  return ptr_executable(handler & ~1u);
+}
+static int ti_walk(const void *ti, int depth, int dump) {
+  if (depth > 10 || !mem_readable(ti, 16)) {
+    if (dump) fprintf(stderr, "    %*sti=%p UNREADABLE\n", depth * 2, "", ti);
+    return 1;
+  }
+  uintptr_t vt = *(const uintptr_t *)ti;
+  int ok = ti_ok(ti);
+  uintptr_t handler = (mem_readable((const void *)(vt + 0x18), 4)) ? *(const uintptr_t *)(vt + 0x18) : 0;
+  if (dump)
+    fprintf(stderr, "    %*sti=%p vt=%p handler=%p ok=%d name=%.48s\n", depth * 2, "",
+            ti, (void *)vt, (void *)handler, ok, ok ? ti_name(ti) : "<<CORROMPIDO>>");
+  if (!ok) return 1;                       /* handler do type_info é lixo */
+  /* tenta __si: base@8 que pareça type_info válido */
+  uintptr_t b8 = *(const uintptr_t *)((const char *)ti + 8);
+  if (mem_readable((const void *)b8, 12) && ti_ok((const void *)b8))
+    return ti_walk((const void *)b8, depth + 1, dump);
+  /* tenta __vmi: count@12, bases@16 (cada base_info: type@0, offflags@4) */
+  if (mem_readable((const char *)ti + 16, 4)) {
+    unsigned cnt = *(const unsigned *)((const char *)ti + 12);
+    if (cnt > 0 && cnt < 32) {
+      int bad = 0;
+      for (unsigned i = 0; i < cnt; i++) {
+        uintptr_t bi = *(const uintptr_t *)((const char *)ti + 16 + i * 8);
+        bad |= ti_walk((const void *)bi, depth + 1, dump);
+      }
+      return bad;
+    }
+  }
+  return 0;
+}
+
 /* instala inline-hook na ENTRADA do __dynamic_cast da libc++ p/ que TODA chamada
  * (inclusive a recursão interna da libc++, que não passa pela GOT da libapp)
  * valide o typeinfo antes. Constrói trampolim com os 8 bytes originais. */
@@ -320,6 +370,21 @@ static void *my_dynamic_cast(const void *sub, const void *src, const void *dst, 
                         ? *(const void *const *)((const char *)g_last_dcast_vt - 4) : 0;
   { struct dcrec *r = &g_dcring[g_dcring_i++ % DCRING];
     r->sub = sub; r->vt = g_last_dcast_vt; r->dst = dst; r->caller = g_last_dcast_caller; }
+  /* dump da cadeia de type_info do objeto p/ achar a base corrompida */
+  if (getenv("NFS_TICHAIN") && g_last_dcast_vt) {
+    static int tn = 0;
+    const void *obj_ti = (mem_readable((const char *)g_last_dcast_vt - 4, 4))
+                             ? *(const void *const *)((const char *)g_last_dcast_vt - 4) : 0;
+    if (tn < 16 && obj_ti) {
+      int bad = ti_walk(obj_ti, 0, 0);     /* 1ª passada silenciosa: só os ruins */
+      if (bad) {
+        fprintf(stderr, "[ti-chain] sub=%p obj_ti=%p caller=%p CADEIA CORROMPIDA:\n",
+                sub, obj_ti, g_last_dcast_caller);
+        ti_walk(obj_ti, 0, 1);             /* 2ª passada: dump completo */
+        tn++;
+      }
+    }
+  }
   if (!mem_readable(sub, 4)) goto fail;
   { const char *vt = *(const char *const *)sub;
     if (!mem_readable(vt - 8, 8)) goto fail;

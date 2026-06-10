@@ -304,6 +304,14 @@ int main(int argc, char *argv[]) {
   /* módulo principal: libapp (resolve contra tudo acima + dlsym) */
   if (load_module(SO_NAME, MEMORY_MB, 0) < 0) return 1;
 
+  /* NFS_RELRO=1: protege .data.rel.ro do libapp (vtables/type_infos) como RO →
+   * se a corrupção dos type_infos do shadergen for overflow gravando ali, vira
+   * fault no WRITE (culpado no PC) em vez de crash silencioso depois. */
+  if (getenv("NFS_RELRO")) {
+    int np = so_protect_relro();
+    debugPrintf("relro: %d seção(ões) protegida(s)\n", np);
+  }
+
   uintptr_t jni_onload = so_find_addr_safe("JNI_OnLoad");
   uintptr_t native_oncreate =
       so_find_addr_safe("Java_com_ea_ironmonkey_GameActivityMain_nativeOnCreate");

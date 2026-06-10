@@ -34,6 +34,7 @@ void hook_arm64(uintptr_t addr, uintptr_t dst);
 void so_make_text_writable(void);
 void so_make_text_executable(void);
 void so_flush_caches(void);
+int so_protect_relro(void);
 void so_free_temp(void);
 int so_load(const char *filename, void *base, size_t max_size);
 int so_relocate(void);

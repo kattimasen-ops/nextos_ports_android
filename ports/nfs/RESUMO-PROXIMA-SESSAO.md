@@ -85,18 +85,25 @@ O `dynamic_cast` que crasha (em `0x46b6fc`, dentro de `0x46b220`) é:
   hierarquia de classes-base → **um type_info BASE da cadeia está corrompido** (vtable do type_info
   = região "HT=1").
 - ❌ **DESCARTADO: bug de relocação.** libapp usa REL padrão (DT_REL 388264B, RELCOUNT=45699, tudo
-  em `.rel.dyn` que o so_relocate processa 100%). SEM packed/RELR/DT_ANDROID_REL. Então os type_infos
-  ESTÃO relocados certos. A corrupção é RUNTIME/heap (consistente c/ PAD mudar o crash).
-- **Próximo passo concreto (RUNTIME)**: dumpar NO DEVICE, no momento do dcast que crasha, a cadeia
-  real: obj(0x47c6858)→*obj=vtable→vtable[-1]=typeinfo→percorrer __base_info. Achar o type_info-base
-  cuja vtable cai FORA das faixas de módulo (= o corrompido). Aí ver QUEM escreveu por cima (provável
-  overflow de heap de um buffer vizinho, OU o objeto foi liberado e o slot reusado). Já tem
-  g_dcring + dump no crash_handler; estender p/ caminhar a cadeia de type_info e logar cada base.
-- Investigar tb: o nó NULO no array (entry #3, `dcast(NULL)` em 0x46b700) — o array de nós de shader
-  tem entradas nulas e/ou selvagens. Ver a construção do array (`this->[24]`, callers 0x3de064 etc).
-- Hipótese de heap: algum buffer de shader/string transborda e esmaga a .data.rel.ro? NÃO — .data.rel.ro
-  é do módulo (read-only após load idealmente). Mais provável: o OBJETO (nó) é que é selvagem/reusado,
-  e por sorte teve vtable plausível; ou um buffer de nós transbordou esmagando nós vizinhos.
+  em `.rel.dyn` que o so_relocate processa 100%). SEM packed/RELR/DT_ANDROID_REL.
+- ❌ **DESCARTADO: corrupção dos type_infos estáticos.** `NFS_RELRO=1` (so_protect_relro) protege
+  `.data.rel.ro[.local]` do libapp como SOMENTE-LEITURA após relocar → **NENHUM fault de escrita**
+  (o crash continua sendo LEITURA de ponteiro selvagem). Logo a .data.rel.ro NUNCA é sobrescrita;
+  os type_infos estão ÍNTEGROS. (relro é seguro de ligar — não quebra nada; bom como safety-net.)
+- ✅ **CONCLUSÃO: o OBJETO castado é SELVAGEM** (não os type_infos). O array de nós do shadergen
+  (`[sl+24]`) tem uma entrada que aponta p/ DADOS de heap/asset (não um Node real). O dcast nesse
+  ponteiro selvagem lê *obj=vtable-falsa→typeinfo-falso→handler=lixo("HT=1"/"TDBG"/"HAIN"/"DLRO",
+  muda c/ heap) → blx em lixo. **Ponteiro de nó inválido / use-after-free / slot não inicializado.**
+- **PRÓXIMO PASSO (achar de onde vem o nó selvagem)**: instrumentar a CONSTRUÇÃO/preenchimento do
+  array de nós `[sl+24]`. O loop que itera e casta está em torno de 0x46ad3c-0x46aff0; o array é
+  preenchido ANTES (na mesma função ou nos callers 0x3de064/0x46b958/0x43c6fc). Hookar onde os nós
+  são alocados/inseridos e logar cada ponteiro; o que aponta p/ fora das faixas de heap válidas (ou
+  é freed) é o culpado. Tipos de Node: desmangle `N2im4isis9shadergenXX...E`.
+- **Hipótese forte = use-after-free OU ABI**: um Node é construído por uma função cujo retorno
+  (ponteiro) vem errado por ABI (ex: softfp/struct-return) OU um Node é liberado e o slot reusado.
+  Conferir se alguma factory de Node retorna ponteiro via registrador/struct que nosso ABI erra.
+- Ferramentas prontas: NFS_TICHAIN (dump da cadeia type_info, c/ heurística __si/__vmi — tem falso-
+  positivo em leaf __class_type_info, cuidado), NFS_RELRO (protege .data.rel.ro), g_dcring no crash.
 
 ### (antigo) caracterização genérica do ponteiro selvagem (ainda válida)
 - O objeto passado ao dynamic_cast tem vtable apontando p/ lixo. Os valores ("HT=1", "TDBG") são

@@ -106,6 +106,29 @@ void so_make_text_executable(void) {
   }
 }
 
+/* protege as seções .data.rel.ro[.local] (onde vivem vtables/type_infos) como
+ * SOMENTE-LEITURA após a relocação. Se algo gravar por cima (overflow de heap →
+ * corrompe type_info), vira SIGSEGV no WRITE → o crash_handler mostra o culpado.
+ * Retorna o nº de seções protegidas. */
+int so_protect_relro(void) {
+  int n = 0;
+  for (int i = 0; i < elf_hdr->e_shnum; i++) {
+    const char *nm = shstrtab + sec_hdr[i].sh_name;
+    if (strncmp(nm, ".data.rel.ro", 12) == 0) {
+      uintptr_t a = (uintptr_t)text_virtbase + sec_hdr[i].sh_addr;
+      uintptr_t pa = a & ~0xFFFu;
+      size_t len = ALIGN_MEM(a + sec_hdr[i].sh_size - pa, 0x1000);
+      if (mprotect((void *)pa, len, PROT_READ) == 0) {
+        debugPrintf("relro: %s [%lx +%lx] -> RO\n", nm, (unsigned long)pa, (unsigned long)len);
+        n++;
+      } else {
+        debugPrintf("relro: mprotect %s falhou\n", nm);
+      }
+    }
+  }
+  return n;
+}
+
 void so_flush_caches(void) {
   __builtin___clear_cache((char *)load_virtbase,
                           (char *)load_virtbase + load_size);
