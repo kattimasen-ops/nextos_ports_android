@@ -726,7 +726,12 @@ int main(int argc, char **argv) {
                 ? "DENTRO ok" : "FORA (canary instavel!)",
             *(unsigned long *)slot);
   }
-  struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = on_crash; sa.sa_flags = SA_SIGINFO;
+  /* sigaltstack: p/ o handler reportar STACK OVERFLOW (SIGSEGV na guard page →
+     sem espaço na pilha normal p/ rodar o handler → morte silenciosa). */
+  { static char altstk[64 * 1024]; stack_t ss = {0};
+    ss.ss_sp = altstk; ss.ss_size = sizeof altstk; ss.ss_flags = 0;
+    sigaltstack(&ss, NULL); }
+  struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = on_crash; sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
   sigaction(SIGSEGV, &sa, 0); sigaction(SIGBUS, &sa, 0); sigaction(SIGABRT, &sa, 0);
   sigaction(SIGILL, &sa, 0); sigaction(SIGFPE, &sa, 0);
   sigaction(SIGTRAP, &sa, 0); sigaction(SIGSYS, &sa, 0);  /* BRK/seccomp matam calado */
@@ -950,6 +955,10 @@ int main(int argc, char **argv) {
   } else {
     fprintf(stderr, "[F1] FALHOU carregar libil2cpp (heap=%p)\n", i2heap);
   }
+  /* informa o sem_shim das bases p/ o detector de livelock mapear callers */
+  { extern void sh_set_bases(unsigned long, unsigned long, unsigned long, unsigned long);
+    sh_set_bases(g_unity_base, 0x2000000, g_il2cpp_base, 0x3000000); }
+
   so_use(g_m_unity);  /* volta o contexto p/ libunity */
 
   /* lista os métodos nativos registrados (achar initJni/nativeRender) */

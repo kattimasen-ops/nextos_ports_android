@@ -139,10 +139,30 @@ int sh_sem_timedwait(void *s, const struct timespec *abs) {
   return rc;
 }
 
+/* detector de livelock: se a MESMA thread posta o MESMO sem N× seguidas (a main
+   girando num loop force-complete), loga o caller (return address) UMA vez por
+   marco — revela o loop em libunity/il2cpp que está preso. */
+static unsigned long g_ubase, g_ibase, g_usize, g_isize;
+void sh_set_bases(unsigned long ub, unsigned long us, unsigned long ib, unsigned long is) {
+  g_ubase = ub; g_usize = us; g_ibase = ib; g_isize = is;
+}
 int sh_sem_post(void *s) {
   struct mysem *m = sem_lookup(s, 1, 0);
   if (!m) return -1;
   if (g_n_post++ < 200) fprintf(stderr, "[SEM] post %p tid=%d\n", s, stid());
+  /* livelock spy */
+  static void *last_sem; static int last_tid, streak;
+  int t = stid();
+  if (s == last_sem && t == last_tid) {
+    if (++streak == 80 || streak == 150 || streak == 190) {
+      void *ra = __builtin_return_address(0);
+      unsigned long r = (unsigned long)ra; const char *lib = "?"; unsigned long off = r;
+      if (g_ubase && r >= g_ubase && r < g_ubase + g_usize) { lib = "libunity"; off = r - g_ubase; }
+      else if (g_ibase && r >= g_ibase && r < g_ibase + g_isize) { lib = "libil2cpp"; off = r - g_ibase; }
+      fprintf(stderr, "[SEM-LIVELOCK] sem=%p tid=%d streak=%d caller=%s+0x%lx\n", s, t, streak, lib, off);
+      fsync(2);
+    }
+  } else { last_sem = s; last_tid = t; streak = 0; }
   pthread_mutex_lock(&m->m);
   m->count++;
   pthread_cond_signal(&m->c);
