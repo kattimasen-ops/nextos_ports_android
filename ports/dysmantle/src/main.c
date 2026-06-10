@@ -331,13 +331,15 @@ static int g_vb_log = 0;
 static int g_vb_dump = 0;
 static uint64_t my_createvb(uint32_t fmt, const void *v, uint32_t cnt, int fl) {
   if (fmt == 0 && getenv("DYSMANTLE_VB_CALLER")) {
-    static int cn = 0;
-    if (cn < 8) {
-      uintptr_t lb = so_find_addr("android_main") - 0x4651a4;
-      uintptr_t ra = (uintptr_t)__builtin_return_address(0);
-      fprintf(stderr, "[VBCALLER] fmt0 caller=game@0x%lx (cnt=%u)\n",
-              (unsigned long)(ra - lb), cnt);
-      cn++;
+    static uintptr_t seen_callers[16]; static int ns = 0;
+    uintptr_t lb = so_find_addr("android_main") - 0x4651a4;
+    uintptr_t ra = (uintptr_t)__builtin_return_address(0) - lb;
+    int known = 0;
+    for (int i = 0; i < ns; i++) if (seen_callers[i] == ra) { known = 1; break; }
+    if (!known && ns < 16) {
+      seen_callers[ns++] = ra;
+      fprintf(stderr, "[VBCALLER] NOVO caller=game@0x%lx (cnt=%u, total callers=%d)\n",
+              (unsigned long)ra, cnt, ns);
     }
   }
   if (g_vb_dump && fmt == 0 && v && cnt >= 4) {
@@ -388,11 +390,95 @@ static void my_genverts(void *self, uint32_t fmt) {
     if (p64[2]) f |= 0x2;  /* texcoord */
     if (p64[3]) f |= 0x4;  /* normal */
     if (p64[4]) f |= 0x10; /* tangent */
-    static int z = 0;
-    if (z < 4) { fprintf(stderr, "[GENV-FIX] fmt 0 -> 0x%x (streams)\n", f); z++; }
     if (f) fmt = f;
+    else { /* streams TODOS nulos — não dá p/ computar formato */
+      static int zn = 0;
+      if (zn < 6) {
+        int32_t count = *(int32_t *)(s + 56);
+        fprintf(stderr, "[GENV-NULLSTREAMS] fmt 0 count=%d this+232=%d (sem streams!)\n",
+                count, *(int32_t *)(s + 232)); zn++;
+      }
+    }
   }
   real_genverts(self, fmt);
+}
+/* helper: computa formato real de uma ModelSurface a partir dos 5 stream ptrs */
+static uint32_t surface_format(uint8_t *s) {
+  uint64_t *p = (uint64_t *)(s + 64);
+  uint32_t f = 0;
+  if (p[0]) f |= 0x1; if (p[1]) f |= 0x8; if (p[2]) f |= 0x2;
+  if (p[3]) f |= 0x4; if (p[4]) f |= 0x10;
+  return f;
+}
+/* detour InitializeVertexAndIndexBuffers: corrige o campo formato (entry+0) das
+ * entradas com formato=0 ANTES da função rodar (computa dos streams da surface). */
+static void (*real_initbufs)(void *);
+static void my_initbufs(void *self) {
+  if (getenv("DYSMANTLE_INITBUF_DUMPALL")) {
+    uint8_t *s = (uint8_t *)self;
+    uint8_t *arr = *(uint8_t **)(s + 224);
+    int32_t cnt = *(int32_t *)(s + 232);
+    static int dn = 0;
+    if (arr && dn < 8) {
+      fprintf(stderr, "[ENTRIES] surface=%p nEntries=%d streams: %p %p %p %p %p\n",
+              self, cnt, *(void**)(s+64),*(void**)(s+72),*(void**)(s+80),
+              *(void**)(s+88),*(void**)(s+96));
+      for (int i = 0; i < cnt && i < 6; i++) {
+        uint8_t *e = arr + (size_t)i * 0x20;
+        uint64_t v8 = *(uint64_t *)(e + 8);
+        uint64_t first = v8 ? *(uint64_t *)v8 : 0;
+        fprintf(stderr, "  entry%d: fmt@0=0x%x @4=0x%x verts@8=0x%lx buf@16=0x%lx [v8]:0x%lx\n",
+                i, *(uint32_t*)e, *(uint32_t*)(e+4), (unsigned long)v8,
+                (unsigned long)*(uint64_t*)(e+16), (unsigned long)first);
+      }
+      dn++;
+    }
+  }
+  if (!getenv("DYSMANTLE_INITBUF_NOFIX")) {
+    uint8_t *s = (uint8_t *)self;
+    uint8_t *arr = *(uint8_t **)(s + 224);
+    int32_t cnt = *(int32_t *)(s + 232);
+    uint32_t real = surface_format(s);
+    if (arr) {
+      for (int i = 0; i < cnt && i < 64; i++) {
+        uint32_t *e = (uint32_t *)(arr + (size_t)i * 0x20);
+        /* e[0]=formato usado pelo createvb (=0, bug); e[1]@offset4=formato REAL
+         * (ex 0x7F). Corrige e[0] := e[1] (ou streams, fallback). */
+        if (e[0] == 0) {
+          uint32_t fix = e[1] ? e[1] : real;
+          static int z = 0;
+          if (z < 3) {
+            uint64_t *e64 = (uint64_t *)(arr + (size_t)i * 0x20);
+            const float *v = (const float *)e64[1];
+            fprintf(stderr, "[INITBUF-FIX] i=%d e[0]->0x%x (e[1]=0x%x) cnt56=%d verts:\n",
+                    i, fix, e[1], *(int32_t *)(s + 56));
+            if (v) for (int r2 = 0; r2 < 6; r2++)
+              fprintf(stderr, "   +%02d: %11.4f %11.4f %11.4f %11.4f | %08x %08x %08x %08x\n",
+                      r2*16, v[r2*4],v[r2*4+1],v[r2*4+2],v[r2*4+3],
+                      ((uint32_t*)v)[r2*4],((uint32_t*)v)[r2*4+1],((uint32_t*)v)[r2*4+2],((uint32_t*)v)[r2*4+3]);
+            z++;
+          }
+          /* OFF por default: verts@8 é OBJETO (não float cru) → e[0]=fmt gera
+           * buffer de lixo. DYSMANTLE_INITBUF_FIX=1 reativa p/ experimentar. */
+          if (fix && getenv("DYSMANTLE_INITBUF_FIX")) e[0] = fix;
+        }
+      }
+    }
+  }
+  real_initbufs(self);
+}
+static void hook_initbufs(void) {
+  uintptr_t lb = so_find_addr("android_main") - 0x4651a4;
+  uintptr_t addr = lb + 0xa03a70;
+  uint32_t *tr = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  tr[0] = *(uint32_t *)addr; tr[1] = 0x58000051u; tr[2] = 0xd61f0220u;
+  *(uint64_t *)&tr[3] = addr + 4;
+  __builtin___clear_cache((char *)tr, (char *)tr + 32);
+  real_initbufs = (void (*)(void *))tr;
+  so_make_text_writable(); hook_arm64(addr, (uintptr_t)my_initbufs);
+  so_make_text_executable(); so_flush_caches();
+  fprintf(stderr, "hook_initbufs: detour @ %p\n", (void *)addr);
 }
 static void hook_genverts(void) {
   uintptr_t lb = so_find_addr("android_main") - 0x4651a4;
@@ -598,6 +684,7 @@ int main(int argc, char *argv[]) {
   g_vb_log = getenv("DYSMANTLE_VB_LOG") ? 1 : 0;
   g_vb_dump = getenv("DYSMANTLE_VB_DUMP") ? 1 : 0;
   hook_genverts(); /* fix do mundo branco: fmt 0 → formato real dos streams */
+  hook_initbufs();
   hook_createvb();
   if (getenv("DYSMANTLE_PB_TRAPS")) install_brk_traps();
 

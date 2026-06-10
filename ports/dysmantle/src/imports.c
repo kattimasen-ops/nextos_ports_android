@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/syscall.h>
 
 #include "so_util.h"
 #include "egl_shim.h"
@@ -511,6 +512,35 @@ static unsigned my_glCheckFramebufferStatus(unsigned tgt) {
   return s;
 }
 
+/* trace de criação de buffer + thread (worker thread sem contexto GL?) */
+static void my_glBufferData(unsigned tgt, long size, const void *data, unsigned usage) {
+  static void (*real)(unsigned, long, const void *, unsigned) = NULL;
+  rgl("glBufferData", (void **)&real);
+  static unsigned (*gerr)(void) = NULL; rgl("glGetError", (void **)&gerr);
+  if (gerr) while (gerr()) {}
+  if (real) real(tgt, size, data, usage);
+  unsigned e = gerr ? gerr() : 0;
+  static int n = 0;
+  if (getenv("DYSMANTLE_BUF_LOG") && (n < 60 || e)) {
+    fprintf(stderr, "[BUFDATA] tid=%d tgt=0x%x size=%ld data=%s usage=0x%x -> err=0x%x\n",
+            (int)syscall(178), tgt, size, data ? "ptr" : "NULL", usage, e); n++;
+  }
+}
+
+/* DIAG depth: força glDepthFunc=ALWAYS (depth-texture FBO quebrado no Utgard?
+ * → mundo culado). DYSMANTLE_DEPTH_ALWAYS=1. =2 desliga depth test inteiro. */
+static void my_glDepthFunc(unsigned f) {
+  static void (*real)(unsigned) = NULL; rgl("glDepthFunc", (void **)&real);
+  if (getenv("DYSMANTLE_DEPTH_ALWAYS")) f = 0x0207; /* GL_ALWAYS */
+  if (real) real(f);
+}
+static void my_glEnable(unsigned cap) {
+  static void (*real)(unsigned) = NULL; rgl("glEnable", (void **)&real);
+  const char *d = getenv("DYSMANTLE_DEPTH_ALWAYS");
+  if (d && atoi(d) == 2 && cap == 0x0B71 /*DEPTH_TEST*/) return; /* não habilita */
+  if (real) real(cap);
+}
+
 /* DIAG: força clear color (magenta) p/ distinguir branco-geometria de fundo */
 static void my_glClearColor(float r, float g, float b, float a) {
   static void (*real)(float, float, float, float) = NULL;
@@ -574,9 +604,19 @@ static void my_glTexImage2D(unsigned tgt, int lvl, int ifmt, int w, int h,
   if (real) real(tgt, lvl, ifmt, w, h, border, fmt, typ, px);
   unsigned e = gerr ? gerr() : 0;
   if (g_tex_log) {
+    /* histograma de (fmt,typ) distintos — pega LUMINANCE/ALPHA escondidos */
+    static unsigned seen_fmt[32]; static int nf = 0;
+    unsigned key = (fmt << 8) | (typ & 0xff);
+    int known = 0;
+    for (int i = 0; i < nf; i++) if (seen_fmt[i] == key) { known = 1; break; }
+    if (!known && nf < 32) {
+      seen_fmt[nf++] = key;
+      const char *fn = fmt==0x1908?"RGBA":fmt==0x1907?"RGB":fmt==0x1909?"LUMINANCE":
+                       fmt==0x190A?"LUMINANCE_ALPHA":fmt==0x1906?"ALPHA":"?";
+      fprintf(stderr, "[TEXFMT] fmt=0x%x(%s) typ=0x%x\n", fmt, fn, typ);
+    }
     static int n = 0;
-    if (n < 60 || e) {
-      /* amostra alguns pixels p/ ver se os DADOS são brancos ou reais */
+    if (n < 80 || e) {
       char pix[80] = "(null)";
       if (px && lvl == 0 && w >= 4 && h >= 4) {
         const unsigned char *b = (const unsigned char *)px;
@@ -584,8 +624,8 @@ static void my_glTexImage2D(unsigned tgt, int lvl, int ifmt, int w, int h,
         snprintf(pix, sizeof(pix), "p0=%02x%02x%02x%02x mid=%02x%02x%02x%02x",
                  b[0], b[1], b[2], b[3], b[mid], b[mid+1], b[mid+2], b[mid+3]);
       }
-      fprintf(stderr, "[TEX2D] ifmt=0x%x %dx%d fmt=0x%x typ=0x%x -> err=0x%x %s\n",
-              ifmt, w, h, fmt, typ, e, pix); n++;
+      fprintf(stderr, "[TEX2D] tex=%u ifmt=0x%x %dx%d fmt=0x%x typ=0x%x -> err=0x%x %s\n",
+              g_bound_tex[g_active_unit < 8 ? g_active_unit : 0], ifmt, w, h, fmt, typ, e, pix); n++;
     }
   }
 }
@@ -825,6 +865,9 @@ DynLibFunction dysmantle_overrides[] = {
   {"glCompressedTexImage2D", (uintptr_t)my_glCompressedTexImage2D},
   {"glTexParameteri", (uintptr_t)my_glTexParameteri},
   {"glClearColor", (uintptr_t)my_glClearColor},
+  {"glBufferData", (uintptr_t)my_glBufferData},
+  {"glEnable", (uintptr_t)my_glEnable},
+  {"glDepthFunc", (uintptr_t)my_glDepthFunc},
   {"glGetUniformLocation", (uintptr_t)my_glGetUniformLocation},
   {"glUniform1i", (uintptr_t)my_glUniform1i},
   {"glBindAttribLocation", (uintptr_t)my_glBindAttribLocation},
