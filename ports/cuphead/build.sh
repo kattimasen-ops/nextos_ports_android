@@ -10,5 +10,5 @@ cd "$(dirname "$0")"
 SRCS=$(ls src/*.c | grep -vE "android_shim")
 $CC --sysroot="$SR" -D_GNU_SOURCE -I src -I "$SR/usr/include" -O2 -fPIC -fno-omit-frame-pointer -rdynamic \
     -o cuphead $SRCS \
-    -lSDL2 -ldl -lm -lpthread
+    -lSDL2 -ldl -lm -lpthread -lgcc_s
 echo "BUILD OK -> $(file cuphead | cut -d, -f1-3)"

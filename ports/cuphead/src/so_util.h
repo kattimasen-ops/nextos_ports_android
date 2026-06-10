@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <elf.h>
 
 #define ALIGN_MEM(x, align) (((x) + ((align) - 1)) & ~((align) - 1))
 
@@ -30,6 +31,10 @@ int so_load(const char *filename, void *base, size_t max_size);
 int so_relocate(void);
 int so_resolve(DynLibFunction *funcs, int num_funcs, int taint_missing_imports);
 int so_register_eh_frame(void);  /* registra .eh_frame do módulo ativo (exceções C++) */
+void so_record_phdr(const char *name);  /* salva phdrs p/ o dl_iterate_phdr custom */
+struct so_phdr_mod { uintptr_t base; Elf64_Phdr ph[20]; int phnum; char name[32]; };
+extern struct so_phdr_mod g_so_mods[4];
+extern int g_so_nmods;
 void so_execute_init_array(void);
 uintptr_t so_find_addr(const char *symbol);
 uintptr_t so_find_addr_safe(const char *symbol);

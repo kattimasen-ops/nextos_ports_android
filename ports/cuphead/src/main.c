@@ -31,8 +31,32 @@
 #include "jni_shim.h"
 #include "opensles_shim.h"
 #include "util.h"
+#include <link.h>
 
 #define HEAP_MB 96
+
+/* ---- dl_iterate_phdr custom (INTERPÕE o da libc) ----
+ * O unwinder C++ da libgcc acha o .eh_frame de cada lib via dl_iterate_phdr. Nossos
+ * módulos (libunity/libil2cpp) são mapeados à mão -> invisíveis ao dl_iterate_phdr da
+ * libc -> exceção C++ não acha o landing pad -> std::terminate -> abort (asset loading).
+ * Como o EXE é -rdynamic e carrega 1º, este símbolo INTERPÕE o da libc: reportamos os
+ * módulos do dynamic linker (via o real, RTLD_NEXT) + os NOSSOS (g_so_mods). */
+int dl_iterate_phdr(int (*cb)(struct dl_phdr_info *, size_t, void *), void *data) {
+  static int (*real)(int (*)(struct dl_phdr_info *, size_t, void *), void *);
+  if (!real) real = (void *)dlsym(RTLD_NEXT, "dl_iterate_phdr");
+  int r = real ? real(cb, data) : 0;
+  if (r) return r;
+  for (int i = 0; i < g_so_nmods; i++) {
+    struct dl_phdr_info info; memset(&info, 0, sizeof info);
+    info.dlpi_addr = (ElfW(Addr))g_so_mods[i].base;
+    info.dlpi_name = g_so_mods[i].name;
+    info.dlpi_phdr = (const ElfW(Phdr) *)g_so_mods[i].ph;
+    info.dlpi_phnum = (ElfW(Half))g_so_mods[i].phnum;
+    r = cb(&info, sizeof info, data);
+    if (r) return r;
+  }
+  return r;
+}
 
 /* canary bionic: libunity lê o stack-guard de tpidr_el0+0x28 (TLS_SLOT_STACK_GUARD
  * do bionic); sob glibc esse offset cai no TLS de outra lib e MUDA em runtime →
@@ -1186,6 +1210,7 @@ int main(int argc, char **argv) {
   fprintf(stderr, "[F0] resolvendo %zu imports...\n", dynlib_numfunctions);
   if (so_resolve(dynlib_functions, dynlib_numfunctions, 0) < 0) { fprintf(stderr, "resolve FALHOU\n"); return 1; }
   ctype_init(); ctype_resolve();   /* _ctype_/_tolower_tab_/_toupper_tab_ (bionic) p/ libunity */
+  so_record_phdr("libunity.so");   /* p/ o dl_iterate_phdr custom (unwind de exceções C++) */
   if (so_register_eh_frame() == 0) fprintf(stderr, "[EH] .eh_frame libunity registrado (exceções C++)\n");
   /* PATCH-GOT: os imports NDK nao estao em dynlib_functions -> set_import foi
    * no-op e ficaram UNRESOLVED (GOT lixo). Sobrescreve os slots DIRETO. */
@@ -1352,6 +1377,7 @@ int main(int argc, char **argv) {
     so_relocate();
     so_resolve(dynlib_functions, dynlib_numfunctions, 0);
     ctype_resolve();   /* _ctype_/_tolower_tab_/_toupper_tab_ p/ libil2cpp tb */
+    so_record_phdr("libil2cpp.so");   /* p/ o dl_iterate_phdr custom (unwind) */
     if (so_register_eh_frame() == 0) fprintf(stderr, "[EH] .eh_frame libil2cpp registrado (exceções C++)\n");
     /* il2cpp abre o global-metadata.dat via open() -> intercepta p/ redirecionar.
        patch_got opera no modulo ATIVO (=il2cpp agora). Tb dlopen/dlsym/log. */

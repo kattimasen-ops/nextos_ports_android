@@ -349,9 +349,9 @@ int so_relocate(void) {
  * do unwinder NÃO os vê -> exceção C++ não acha o landing pad -> std::terminate
  * -> abort (visto no asset loading do il2cpp). __register_frame(.eh_frame) resolve
  * (mesma técnica de JIT/código gerado em runtime). */
-extern void __register_frame(void *begin) __attribute__((weak));
+extern void __register_frame(void *begin);
 int so_register_eh_frame(void) {
-  if (!&__register_frame) return -1;
+  if (!getenv("CUP_EHREG")) return -1;   /* __register_frame crasha (formato); usar dl_iterate_phdr */
   for (int i = 0; i < elf_hdr->e_shnum; i++) {
     if (!strcmp(shstrtab + sec_hdr[i].sh_name, ".eh_frame") && sec_hdr[i].sh_size) {
       void *eh = (void *)((uintptr_t)text_base + sec_hdr[i].sh_addr);
@@ -360,6 +360,30 @@ int so_register_eh_frame(void) {
     }
   }
   return -1;
+}
+
+/* ---- snapshot dos phdr de cada módulo p/ o dl_iterate_phdr custom ----
+ * O unwinder C++ (libgcc) acha o .eh_frame via dl_iterate_phdr, que só enxerga
+ * libs do dynamic linker. Nossos módulos são mapeados à mão -> invisíveis. Salvamos
+ * uma CÓPIA estável dos phdrs (com p_vaddr ORIGINAL: so_load modifica text/data p/
+ * absoluto -> recuperamos subtraindo a base) + a base (dlpi_addr=load_virtbase). */
+#define SO_MAX_PH 20
+struct so_phdr_mod g_so_mods[4];
+int g_so_nmods = 0;
+void so_record_phdr(const char *name) {
+  if (g_so_nmods >= 4) return;
+  struct so_phdr_mod *m = &g_so_mods[g_so_nmods++];
+  uintptr_t lb = (uintptr_t)load_virtbase;
+  m->base = lb;
+  int n = elf_hdr->e_phnum; if (n > SO_MAX_PH) n = SO_MAX_PH;
+  m->phnum = n;
+  for (int i = 0; i < n; i++) {
+    m->ph[i] = prog_hdr[i];
+    /* so_load setou p_vaddr de text/data p/ o ENDEREÇO ABSOLUTO -> volta p/ offset */
+    if (m->ph[i].p_vaddr >= lb) m->ph[i].p_vaddr -= lb;
+  }
+  for (int i = 0; i < 31 && name[i]; i++) m->name[i] = name[i];
+  m->name[31] = 0;
 }
 
 int so_resolve(DynLibFunction *funcs, int num_funcs,
