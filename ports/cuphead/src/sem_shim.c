@@ -156,33 +156,24 @@ unsigned long volatile g_sem_storm_caller = 0;
 int sh_sem_post(void *s) {
   struct mysem *m = sem_lookup(s, 1, 0);
   if (!m) return -1;
-  if (g_n_post++ < 200) fprintf(stderr, "[SEM] post %p tid=%d\n", s, stid());
-  /* livelock spy */
-  static void *last_sem; static int last_tid, streak;
+  if (g_n_post++ < 60) fprintf(stderr, "[SEM] post %p tid=%d\n", s, stid());
+  /* livelock spy — SEM I/O (fsync/dump pesado tornava o storm lentíssimo e o jogo
+     parecia travado). Loga 1× só, sem fsync, e fast-path drena o storm rápido. */
+  static void *last_sem; static int last_tid, streak; static int logged_once;
   int t = stid();
   if (s == last_sem && t == last_tid) {
     streak++;
-    if (streak == 80 || streak == 150 || streak == 190) {
+    if (streak == 150 && !logged_once) {
+      logged_once = 1;
       void *ra = __builtin_return_address(0);
       unsigned long r = (unsigned long)ra; const char *lib = "?"; unsigned long off = r;
       if (g_ubase && r >= g_ubase && r < g_ubase + g_usize) { lib = "libunity"; off = r - g_ubase; }
       else if (g_ibase && r >= g_ibase && r < g_ibase + g_isize) { lib = "libil2cpp"; off = r - g_ibase; }
-      fprintf(stderr, "[SEM-LIVELOCK] sem=%p tid=%d streak=%d caller=%s+0x%lx\n", s, t, streak, lib, off);
+      fprintf(stderr, "[SEM-LIVELOCK] sem=%p tid=%d caller=%s+0x%lx (log 1x, sem fsync)\n", s, t, lib, off);
       if (!g_sem_storm) { g_sem_storm_ptr = s; g_sem_storm_caller = r; g_sem_storm = 1; }
-      /* dump do objeto Semaphore do Unity (count atômico corrompido → N enorme).
-         O sem_t fica embutido no objeto; varremos s-0x20..s+0x18 p/ achar o count
-         (valor grande) e os campos vizinhos (capacity/vtable). */
-      unsigned long b = (unsigned long)s & ~0x7UL;
-      for (long d = -0x20; d <= 0x18; d += 8) {
-        unsigned long a = b + d;
-        fprintf(stderr, "[SEM-OBJ] s%+ld (0x%lx): %016lx\n", d, a, *(unsigned long *)a);
-      }
-      fsync(2);
     }
-    /* fast-path: depois de muito streak, a corrupção já está caracterizada;
-       para de bloquear/sinalizar p/ drenar o loop Signal rápido e alcançar o
-       código pós-storm (crash 0x7f10000004 com dump rico). CUP_SEMNODRAIN desliga. */
-    if (streak > 400 && !getenv("CUP_SEMNODRAIN")) {
+    /* fast-path: drena o storm rápido (só count++, sem cond_signal/I/O) */
+    if (streak > 200 && !getenv("CUP_SEMNODRAIN")) {
       pthread_mutex_lock(&m->m); m->count++; pthread_mutex_unlock(&m->m);
       return 0;
     }
