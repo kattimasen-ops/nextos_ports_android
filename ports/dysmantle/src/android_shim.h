@@ -9,6 +9,7 @@
 #define __ANDROID_SHIM_H__
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* ---------- Forward declarations / opaque types ---------- */
 
@@ -90,29 +91,39 @@ struct android_poll_source {
   void (*process)(struct android_app *app, struct android_poll_source *source);
 };
 
+/* LAYOUT GameActivity (AGDK) — offsets confirmados via disasm do glue estático
+ * do libNativeGame.so. NÃO é o native_app_glue clássico (onInputEvent@16,
+ * activity@24). Aqui: window@56, flag@92, mutex@200, cond@240, msgread@288,
+ * msgwrite@292, pendingWindow@344, motionEventFilter@376. */
 struct android_app {
-  void *userData;
-  void (*onAppCmd)(struct android_app *app, int32_t cmd);
-  int32_t (*onInputEvent)(struct android_app *app, AInputEvent *event);
-
-  ANativeActivity *activity;
-  AConfiguration *config;
-  void *savedState;
-  size_t savedStateSize;
-
-  ALooper *looper;
-  AInputQueue *inputQueue;
-  ANativeWindow *window;
-
-  int activityState;
-  int destroyRequested;
-
-  // Internal pipe for commands
-  int msgread;
-  int msgwrite;
-
-  struct android_poll_source cmdPollSource;
-  struct android_poll_source inputPollSource;
+  void *userData;                                       /* 0   */
+  void (*onAppCmd)(struct android_app *app, int32_t cmd);/* 8  */
+  ANativeActivity *activity;                            /* 16  */
+  AConfiguration *config;                               /* 24  */
+  void *savedState;                                     /* 32  */
+  size_t savedStateSize;                                /* 40  */
+  ALooper *looper;                                      /* 48  */
+  ANativeWindow *window;                                /* 56  */
+  char _pad64[24];                                      /* 64..87 */
+  int activityState;                                    /* 88  */
+  int destroyRequested;                                 /* 92  (GameActivity: flag window-ready) */
+  char _pad96[104];                                     /* 96..199 */
+  void *_mutex;                                         /* 200 (bridge guarda ptr glibc) */
+  char _pad208[32];                                     /* 208..239 */
+  void *_cond;                                          /* 240 (bridge) */
+  char _pad248[40];                                     /* 248..287 */
+  int msgread;                                          /* 288 */
+  int msgwrite;                                         /* 292 */
+  char _pad296[48];                                     /* 296..343 */
+  ANativeWindow *pendingWindow;                         /* 344 */
+  char _pad352[24];                                     /* 352..375 */
+  void *motionEventFilter;                              /* 376 */
+  void *keyEventFilter;                                 /* 384 */
+  /* --- campos auxiliares nossos (além do struct GameActivity) --- */
+  int32_t (*onInputEvent)(struct android_app *app, AInputEvent *event); /* 392 */
+  AInputQueue *inputQueue;                              /* 400 */
+  struct android_poll_source cmdPollSource;             /* 408 */
+  struct android_poll_source inputPollSource;           /* 432 */
 };
 
 /* ---------- ALooper ---------- */

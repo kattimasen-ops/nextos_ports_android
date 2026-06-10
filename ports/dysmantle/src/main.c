@@ -9,6 +9,7 @@
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,36 +43,83 @@ static void build_base_table(void) {
          sizeof(DynLibFunction) * revc_pthread_count);
 }
 
+static void resolve_addr(uintptr_t a, char *out, int outsz);
 static void crash_handler(int sig, siginfo_t *info, void *uc) {
   uintptr_t fault = (uintptr_t)info->si_addr;
   uintptr_t tb = (uintptr_t)text_base;
   fprintf(stderr, "\n=== CRASH sig=%d addr=%p ===\n", sig, info->si_addr);
   ucontext_t *u = (ucontext_t *)uc;
   uintptr_t pc = u->uc_mcontext.pc;
-  fprintf(stderr, "  PC=%p", (void *)pc);
-  if (tb && pc >= tb && pc < tb + text_size)
-    fprintf(stderr, " = %s+0x%lx", GAME_SO, (unsigned long)(pc - tb));
-  fprintf(stderr, "\n");
-  if (tb && fault >= tb && fault < tb + text_size)
-    fprintf(stderr, "  fault %s+0x%lx\n", GAME_SO, (unsigned long)(fault - tb));
+  char r[300];
+  resolve_addr(pc, r, sizeof(r));
+  fprintf(stderr, "  PC=%p %s\n", (void *)pc, r);
   uintptr_t fp = u->uc_mcontext.regs[29];
-  for (int f = 0; f < 20 && fp; f++) {
+  for (int f = 0; f < 24 && fp; f++) {
     uintptr_t *p = (uintptr_t *)fp; uintptr_t next = p[0], lr = p[1];
     if (!lr) break;
-    fprintf(stderr, "  #%-2d lr %p", f, (void *)lr);
-    if (lr >= tb && lr < tb + text_size) fprintf(stderr, " (%s+0x%lx)", GAME_SO, (unsigned long)(lr - tb));
+    resolve_addr(lr, r, sizeof(r));
+    fprintf(stderr, "  #%-2d lr %p %s\n", f, (void *)lr, r);
+    if (next <= fp) break; fp = next;
+  }
+  (void)fault;
+  fflush(stderr);
+  _exit(128 + sig);
+}
+/* resolve addr -> "mapname+off" lendo /proc/self/maps (async-signal: usa só read) */
+static void resolve_addr(uintptr_t a, char *out, int outsz) {
+  int fd = open("/proc/self/maps", O_RDONLY);
+  out[0] = 0;
+  if (fd < 0) return;
+  char buf[8192]; int n; char line[400]; int li = 0;
+  while ((n = read(fd, buf, sizeof(buf))) > 0) {
+    for (int i = 0; i < n; i++) {
+      char c = buf[i];
+      if (c == '\n' || li >= (int)sizeof(line) - 1) {
+        line[li] = 0;
+        unsigned long s, e; char perm[8]; char path[256]; path[0] = 0;
+        if (sscanf(line, "%lx-%lx %7s %*x %*s %*d %255s", &s, &e, perm, path) >= 3) {
+          if (a >= s && a < e) {
+            const char *base = strrchr(path, '/'); base = base ? base + 1 : (path[0] ? path : "?");
+            snprintf(out, outsz, "%s+0x%lx", base, (unsigned long)(a - s));
+            close(fd); return;
+          }
+        }
+        li = 0;
+      } else line[li++] = c;
+    }
+  }
+  close(fd);
+}
+/* SIGUSR1: dump backtrace da thread atual SEM sair, resolvendo cada frame. */
+static void bt_handler(int sig, siginfo_t *info, void *uc) {
+  (void)sig; (void)info;
+  ucontext_t *u = (ucontext_t *)uc;
+  uintptr_t tb = (uintptr_t)text_base, pc = u->uc_mcontext.pc;
+  char r[300];
+  resolve_addr(pc, r, sizeof(r));
+  fprintf(stderr, "\n[BT tid=%d] PC=%p %s", (int)syscall(178), (void *)pc, r);
+  if (pc >= tb && pc < tb + text_size) fprintf(stderr, " {%s+0x%lx}", GAME_SO, (unsigned long)(pc - tb));
+  fprintf(stderr, "\n");
+  uintptr_t fp = u->uc_mcontext.regs[29];
+  for (int f = 0; f < 28 && fp; f++) {
+    uintptr_t *p = (uintptr_t *)fp; uintptr_t next = p[0], lr = p[1];
+    if (!lr) break;
+    resolve_addr(lr, r, sizeof(r));
+    fprintf(stderr, "  #%-2d lr %p %s", f, (void *)lr, r);
+    if (lr >= tb && lr < tb + text_size) fprintf(stderr, " {%s+0x%lx}", GAME_SO, (unsigned long)(lr - tb));
     fprintf(stderr, "\n");
     if (next <= fp) break; fp = next;
   }
-  fprintf(stderr, "  text_base=%p size=0x%zx\n", text_base, text_size);
   fflush(stderr);
-  _exit(128 + sig);
 }
 static void install_crash_handler(void) {
   struct sigaction sa; memset(&sa, 0, sizeof(sa));
   sa.sa_sigaction = crash_handler; sa.sa_flags = SA_SIGINFO;
   sigaction(SIGSEGV, &sa, NULL); sigaction(SIGBUS, &sa, NULL);
   sigaction(SIGILL, &sa, NULL); sigaction(SIGABRT, &sa, NULL);
+  struct sigaction sb; memset(&sb, 0, sizeof(sb));
+  sb.sa_sigaction = bt_handler; sb.sa_flags = SA_SIGINFO;
+  sigaction(SIGUSR1, &sb, NULL);
 }
 
 static void preload_device_libs(void) {
@@ -82,6 +130,88 @@ static void preload_device_libs(void) {
     void *h = dlopen(libs[i], RTLD_NOW | RTLD_GLOBAL);
     fprintf(stderr, "preload: %s %s\n", libs[i], h ? "OK" : dlerror());
   }
+}
+
+/* Patch runtime: escreve instruções aarch64 num símbolo do jogo. */
+static void patch_words(const char *sym, const uint32_t *words, int n) {
+  uintptr_t a = so_find_addr(sym);
+  if (!a) { fprintf(stderr, "patch: símbolo %s não encontrado\n", sym); return; }
+  uintptr_t pg = a & ~0xFFFUL;
+  if (mprotect((void *)pg, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+    fprintf(stderr, "patch: mprotect %s falhou\n", sym); return;
+  }
+  for (int i = 0; i < n; i++) ((uint32_t *)a)[i] = words[i];
+  mprotect((void *)pg, 0x2000, PROT_READ | PROT_EXEC);
+  __builtin___clear_cache((char *)a, (char *)a + n * 4);
+  fprintf(stderr, "patch: %s @ %p (%d instr)\n", sym, (void *)a, n);
+}
+static void patch_func_ret(const char *sym) {
+  uint32_t w[] = {0xd65f03c0}; /* ret */
+  patch_words(sym, w, 1);
+}
+static void patch_func_ret0(const char *sym) {
+  uint32_t w[] = {0x52800000, 0xd65f03c0}; /* mov w0,#0 ; ret */
+  patch_words(sym, w, 2);
+}
+/* patch num vaddr arbitrário (load_base derivado de android_main vaddr 0x4651a4) */
+static void patch_vaddr(uintptr_t vaddr, uint32_t word) {
+  uintptr_t lb = so_find_addr("android_main") - 0x4651a4;
+  uintptr_t a = lb + vaddr;
+  uintptr_t pg = a & ~0xFFFUL;
+  if (mprotect((void *)pg, 0x2000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+    fprintf(stderr, "patch_vaddr mprotect falhou\n"); return; }
+  *(uint32_t *)a = word;
+  mprotect((void *)pg, 0x2000, PROT_READ | PROT_EXEC);
+  __builtin___clear_cache((char *)a, (char *)a + 4);
+  fprintf(stderr, "patch_vaddr: 0x%lx = 0x%08x @ %p\n", (unsigned long)vaddr, word, (void *)a);
+}
+
+/* ---- hooks de trace p/ achar o stack-smash no renderer init ---- */
+static long (*o_initver)(void *);
+static long w_initver(void *s){ fprintf(stderr,"ENTER InitializeVersions\n"); long r=o_initver(s); fprintf(stderr,"EXIT InitializeVersions=%ld\n",r); return r; }
+static long (*o_initsl)(void *);
+static long w_initsl(void *s){ fprintf(stderr,"ENTER InitShadingLangVersion\n"); long r=o_initsl(s); fprintf(stderr,"EXIT InitShadingLangVersion=%ld\n",r); return r; }
+static void (*o_getfuncs)(void *);
+static void w_getfuncs(void *s){ fprintf(stderr,"ENTER APIManager::GetFunctions\n"); o_getfuncs(s); fprintf(stderr,"EXIT APIManager::GetFunctions\n"); }
+static const char *(*o_helpergetstr)(unsigned);
+static const char *w_helpergetstr(unsigned n){ fprintf(stderr,"ENTER GL::Helper::GetString(0x%x)\n", n); const char *r=o_helpergetstr(n); fprintf(stderr,"EXIT GL::Helper::GetString=%p\n",(void*)r); return r; }
+static void hook_got(const char *sym, uintptr_t wrap, void *save) {
+  uintptr_t slot = so_find_rel_addr_safe(sym);
+  if (!slot) { fprintf(stderr, "trace-hook: GOT %s não achado\n", sym); return; }
+  *(uintptr_t *)save = *(uintptr_t *)slot;
+  *(uintptr_t *)slot = wrap;
+  fprintf(stderr, "trace-hook: %s\n", sym);
+}
+static long (*o_ctxinit)(void *, void *, int);
+static long w_ctxinit(void *a, void *b, int c){ fprintf(stderr,"ENTER ContextImpEGL::Initialize\n"); long r=o_ctxinit(a,b,c); fprintf(stderr,"EXIT ContextImpEGL::Initialize=%ld\n",r); return r; }
+static void (*o_getpre)(void *);
+static void w_getpre(void *s){ fprintf(stderr,"ENTER GetPreInitializationFunctions\n"); o_getpre(s); fprintf(stderr,"EXIT GetPreInitializationFunctions\n"); }
+static void install_trace_hooks(void) {
+  hook_got("_ZN13ContextImpEGL10InitializeEP10nx_state_ti", (uintptr_t)w_ctxinit, &o_ctxinit);
+  hook_got("_ZN2GL10APIManager29GetPreInitializationFunctionsEP21ContextImplementation", (uintptr_t)w_getpre, &o_getpre);
+  hook_got("_ZN28RendererImplementationOpenGL18InitializeVersionsEv", (uintptr_t)w_initver, &o_initver);
+  hook_got("_ZN28RendererImplementationOpenGL32InitializeShadingLanguageVersionEv", (uintptr_t)w_initsl, &o_initsl);
+  hook_got("_ZN2GL10APIManager12GetFunctionsEv", (uintptr_t)w_getfuncs, &o_getfuncs);
+  hook_got("_ZN2GL6Helper9GetStringEj", (uintptr_t)w_helpergetstr, &o_helpergetstr);
+}
+
+/* GOT-hook de NXI_GetProductValue -> força opengl_version="2.0" (caminho ES2) */
+static const char *(*orig_getprod)(const char *) = NULL;
+static const char *my_getprod(const char *key) {
+  const char *r = orig_getprod ? orig_getprod(key) : NULL;
+  if (key && strcmp(key, "opengl_version") == 0) {
+    fprintf(stderr, "[cfg] opengl_version real='%s' -> forçando '2.0'\n", r ? r : "(null)");
+    return "2.0";
+  }
+  return r;
+}
+static void hook_getproductvalue(void) {
+  uintptr_t slot = so_find_rel_addr_safe("_Z19NXI_GetProductValuePKc");
+  if (!slot) { fprintf(stderr, "hook: GOT de NXI_GetProductValue não achado\n"); return; }
+  uintptr_t *p = (uintptr_t *)slot;
+  orig_getprod = (const char *(*)(const char *))*p;
+  *p = (uintptr_t)my_getprod;
+  fprintf(stderr, "hook: NXI_GetProductValue GOT %p orig=%p\n", (void *)slot, (void *)orig_getprod);
 }
 
 static void load_module(const char *name, int heap_mb, DynLibFunction *tbl, int n) {
@@ -123,6 +253,19 @@ int main(int argc, char *argv[]) {
 
   /* Módulo B: libNativeGame.so */
   load_module(GAME_SO, GAME_HEAP_MB, comb, comb_n);
+
+  /* Neutraliza SwappyGL (frame pacing AGDK): SwappyGL_init faz JNI pesado p/
+   * consultar o display e corrompe a pilha com nosso JNI fake -> stack smash
+   * em ContextImpEGL::Initialize. init=ret, isEnabled=return 0 (engine usa
+   * eglSwapBuffers direto via ContextImpEGL::SwapBuffers). */
+  patch_func_ret("SwappyGL_init");
+  patch_func_ret0("SwappyGL_isEnabled");
+
+  /* GOT-hook NXI_GetProductValue: a engine lê "opengl_version" do config; se
+   * pedir ES3 ela monta o APIManager ES3 (mais funções) num buffer de pilha
+   * dimensionado p/ ES2 -> stack smash no nosso contexto Utgard (ES2).
+   * Forçamos "2.0" p/ alinhar a engine ao caminho ES2. */
+  hook_getproductvalue();
 
   uintptr_t am = so_find_addr("android_main");
   if (!am) { fprintf(stderr, "android_main NÃO encontrado\n"); exit(1); }

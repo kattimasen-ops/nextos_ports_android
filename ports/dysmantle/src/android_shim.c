@@ -22,6 +22,7 @@
 
 #include "android_shim.h"
 #include "error.h"
+#include "so_util.h"
 #include "jni_shim.h"
 #include "opensles_shim.h"
 #include "util.h"
@@ -597,15 +598,22 @@ void ANativeActivity_finish(void *activity) {
   g_app.destroyRequested = 1;
 }
 
-/* ---- android_app command processing ---- */
+/* ---- android_app command processing (GameActivity glue) ----
+ * O glue ESTÁTICO do jogo expõe android_app_pre_exec_cmd/post_exec_cmd:
+ * pre_exec(INIT_WINDOW) faz window=pendingWindow, broadcast cond, seta a flag
+ * (app+92) que o loop do android_main espera. Resolvidos em android_shim_init. */
+void (*g_app_pre_exec_cmd)(struct android_app *, int) = NULL;
+void (*g_app_post_exec_cmd)(struct android_app *, int) = NULL;
 
 static void process_cmd(struct android_app *app,
                         struct android_poll_source *source) {
   (void)source;
   int8_t cmd;
   if (read(app->msgread, &cmd, sizeof(cmd)) == sizeof(cmd)) {
-    if (app->onAppCmd)
-      app->onAppCmd(app, cmd);
+    debugPrintf("android_shim: process_cmd cmd=%d\n", (int)cmd);
+    if (g_app_pre_exec_cmd) g_app_pre_exec_cmd(app, cmd);
+    if (app->onAppCmd) app->onAppCmd(app, cmd);
+    if (g_app_post_exec_cmd) g_app_post_exec_cmd(app, cmd);
   }
 }
 
@@ -669,8 +677,18 @@ struct android_app *android_shim_init(void) {
   g_app.activity = &g_activity;
   g_app.config = AConfiguration_new();
   g_app.looper = ALooper_prepare(0);
+  // GameActivity: o glue copia pendingWindow -> window no APP_CMD_INIT_WINDOW.
+  g_app.pendingWindow = (ANativeWindow *)&g_fake_native_window;
   g_app.window = (ANativeWindow *)&g_fake_native_window;
   g_app.inputQueue = (AInputQueue *)&g_fake_input_queue;
+
+  // Resolve os helpers do glue GameActivity (estáticos no libNativeGame).
+  extern void (*g_app_pre_exec_cmd)(struct android_app *, int);
+  extern void (*g_app_post_exec_cmd)(struct android_app *, int);
+  g_app_pre_exec_cmd  = (void (*)(struct android_app *, int))so_find_addr("android_app_pre_exec_cmd");
+  g_app_post_exec_cmd = (void (*)(struct android_app *, int))so_find_addr("android_app_post_exec_cmd");
+  debugPrintf("android_shim: glue pre_exec=%p post_exec=%p\n",
+              (void *)g_app_pre_exec_cmd, (void *)g_app_post_exec_cmd);
 
   // Command poll source
   g_app.cmdPollSource.id = LOOPER_ID_MAIN;

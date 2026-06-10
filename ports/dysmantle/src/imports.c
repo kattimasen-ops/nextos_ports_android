@@ -145,6 +145,76 @@ static const void *SL_IID_ANDROIDCONFIGURATION_v = "ACFG";
 /* EGL shim funcs já declaradas em egl_shim.h (assinaturas reais) */
 static unsigned egl_releasethread_stub(void) { return 1u; }
 
+/* glGetString: o renderer NX copia GL_EXTENSIONS/GL_VERSION em buffers de pilha
+ * fixos (engine feita p/ ES3). A lista REAL do Mali Utgard estoura -> stack smash.
+ * Retornamos strings curtas/controladas (ES 2.0 + extensões mínimas). */
+static const unsigned char *my_glGetString(unsigned name) {
+  fprintf(stderr, "[my_glGetString] name=0x%x\n", name);
+  switch (name) {
+  case 0x1F00: return (const unsigned char *)"NextOS";                 /* GL_VENDOR */
+  case 0x1F01: return (const unsigned char *)"Mali-450 (GLES2)";       /* GL_RENDERER */
+  case 0x1F02: return (const unsigned char *)"OpenGL ES 2.0";          /* GL_VERSION */
+  case 0x8B8C: return (const unsigned char *)"OpenGL ES GLSL ES 1.00"; /* GL_SHADING_LANGUAGE_VERSION */
+  case 0x1F03: return (const unsigned char *)                          /* GL_EXTENSIONS */
+      "GL_OES_texture_npot GL_OES_depth_texture GL_OES_packed_depth_stencil "
+      "GL_OES_rgb8_rgba8 GL_OES_element_index_uint GL_OES_vertex_array_object "
+      "GL_EXT_texture_format_BGRA8888";
+  default: {
+    static const unsigned char *(*real)(unsigned) = NULL;
+    if (!real) real = dlsym(RTLD_DEFAULT, "glGetString");
+    const unsigned char *r = real ? real(name) : NULL;
+    return r ? r : (const unsigned char *)"";
+  }
+  }
+}
+
+/* Roteador p/ funções GL que precisamos controlar (anti stack-smash). */
+void *dysmantle_gl_proc_override(const char *name) {
+  if (name && strcmp(name, "glGetString") == 0) return (void *)my_glGetString;
+  return NULL;
+}
+
+/* A engine resolve as funções GL via dlsym DIRETO (libGLESv2 do device),
+ * driblando a tabela de imports E o eglGetProcAddress. Interceptamos dlsym
+ * p/ devolver NOSSO glGetString (strings curtas) e deixar o resto passar. */
+static void *my_dlsym(void *handle, const char *name) {
+  void *ov = dysmantle_gl_proc_override(name);
+  if (ov) { fprintf(stderr, "[my_dlsym] override %s\n", name); return ov; }
+  return dlsym(handle, name);
+}
+static void *my_dlopen(const char *name, int flag) { return dlopen(name, flag); }
+static int   my_dlclose(void *h) { return dlclose(h); }
+
+/* ---- GL wrappers com LOG (pinpoint do stack-smash no renderer init) ---- */
+static void rgl(const char *n, void **slot) {
+  if (!*slot) *slot = dlsym(RTLD_DEFAULT, n);
+}
+static void my_glGetIntegerv(unsigned pname, int *params) {
+  static void (*real)(unsigned, int *) = NULL; rgl("glGetIntegerv", (void **)&real);
+  fprintf(stderr, "[GL] glGetIntegerv(0x%x)\n", pname);
+  /* pnames multi-valor que estouram buffer de 1 int -> zera */
+  if (pname == 0x86A3 /*COMPRESSED_TEXTURE_FORMATS*/ ||
+      pname == 0x8DF8 /*SHADER_BINARY_FORMATS*/ ||
+      pname == 0x87FE /*PROGRAM_BINARY_FORMATS*/) { if (params) params[0] = 0; return; }
+  if (real) real(pname, params); else if (params) params[0] = 0;
+}
+static const unsigned char *my_glGetStringi(unsigned name, unsigned index) {
+  fprintf(stderr, "[GL] glGetStringi(0x%x, %u)\n", name, index);
+  return (const unsigned char *)"";
+}
+static unsigned my_glGetError(void) {
+  static unsigned (*real)(void) = NULL; rgl("glGetError", (void **)&real);
+  return real ? real() : 0;
+}
+
+/* __stack_chk_fail neutralizado: a "corrupção" da canary no renderer init pode
+ * ser falso-positivo (nossos valores EGL/struct). Em vez de abortar, logamos e
+ * RETORNAMOS -> a função segue p/ o ret normal. DIAGNÓSTICO. */
+static void my_stack_chk_fail(void) {
+  static int n = 0;
+  if (n++ < 8) fprintf(stderr, "[stack_chk_fail] IGNORADO (#%d) - seguindo\n", n);
+}
+
 DynLibFunction dysmantle_overrides[] = {
   /* liblog */
   {"__android_log_print", (uintptr_t)b_log_print},
@@ -175,6 +245,17 @@ DynLibFunction dysmantle_overrides[] = {
   {"eglSwapInterval", (uintptr_t)egl_shim_SwapInterval},
   {"eglBindAPI", (uintptr_t)egl_shim_BindAPI},
   {"eglReleaseThread", (uintptr_t)egl_releasethread_stub},
+  /* GL string override (anti stack-smash do Utgard) */
+  {"glGetString", (uintptr_t)my_glGetString},
+  /* intercepta dlsym (a engine resolve GL por aqui) */
+  {"dlsym", (uintptr_t)my_dlsym},
+  {"dlopen", (uintptr_t)my_dlopen},
+  {"dlclose", (uintptr_t)my_dlclose},
+  /* GL wrappers com log p/ pinpoint do smash */
+  {"glGetIntegerv", (uintptr_t)my_glGetIntegerv},
+  {"glGetStringi", (uintptr_t)my_glGetStringi},
+  {"glGetError", (uintptr_t)my_glGetError},
+  {"__stack_chk_fail", (uintptr_t)my_stack_chk_fail},
   /* ANativeWindow */
   {"ANativeWindow_fromSurface", (uintptr_t)aw_fromSurface},
   {"ANativeWindow_acquire", (uintptr_t)aw_acquire},

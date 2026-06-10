@@ -289,6 +289,7 @@ EGLBoolean egl_shim_QuerySurface(EGLDisplay dpy, EGLSurface surface,
 EGLBoolean egl_shim_GetConfigAttrib(EGLDisplay dpy, EGLConfig config,
                                      EGLint attribute, EGLint *value) {
   (void)dpy; (void)config;
+  debugPrintf("egl_shim: eglGetConfigAttrib(attr=0x%x)\n", attribute);
   if (!value) return EGL_TRUE;
   switch (attribute) {
   case 0x3020: *value = 8; break;
@@ -305,6 +306,12 @@ EGLBoolean egl_shim_GetConfigAttrib(EGLDisplay dpy, EGLConfig config,
 EGLint egl_shim_GetError(void) { return EGL_SUCCESS; }
 
 void *egl_shim_GetProcAddress(const char *procname) {
+  /* Override GL: a engine resolve glGetString via procaddress; devolvemos NOSSA
+   * versão (strings curtas) p/ evitar stack-smash com a lista de extensões do Mali. */
+  extern void *dysmantle_gl_proc_override(const char *name);
+  void *ov = dysmantle_gl_proc_override(procname);
+  if (ov) { debugPrintf("egl_shim: proc override %s\n", procname); return ov; }
+
   void *ptr = SDL_GL_GetProcAddress(procname);
   if (ptr) return ptr;
 
