@@ -381,11 +381,75 @@ static void my_glTexStorage2D(unsigned tgt, int lvls, unsigned ifmt, int w,
 /* glTexImage2D: loga ifmt/fmt/type/dim + erro GL. ifmt GLES3 (ex: GL_RGBA8
  * 0x8058, GL_SRGB8 0x8C41, sized) NÃO existe no GLES2 → INVALID_ENUM →
  * textura branca. GLES2 quer ifmt = base (GL_RGBA 0x1908) sem sized. */
+/* ---- FBO diag (render-to-texture do mundo: incompleto no Mali → branco) ---- */
+static unsigned g_cur_fbo = 0;
+static unsigned long g_draws_fbo = 0, g_draws_screen = 0;
+static void my_glBindFramebuffer(unsigned tgt, unsigned fb) {
+  static void (*real)(unsigned, unsigned) = NULL;
+  rgl("glBindFramebuffer", (void **)&real);
+  g_cur_fbo = fb;
+  if (real) real(tgt, fb);
+}
+static void my_glDrawElements(unsigned mode, int cnt, unsigned typ, const void *idx) {
+  static void (*real)(unsigned, int, unsigned, const void *) = NULL;
+  rgl("glDrawElements", (void **)&real);
+  if (g_cur_fbo) g_draws_fbo++; else g_draws_screen++;
+  static unsigned long t = 0;
+  if ((++t % 3000) == 0)
+    fprintf(stderr, "[DRAWSTATS] fbo=%lu screen=%lu (cur_fbo=%u)\n",
+            g_draws_fbo, g_draws_screen, g_cur_fbo);
+  if (real) real(mode, cnt, typ, idx);
+}
+static void my_glDrawArrays(unsigned mode, int first, int cnt) {
+  static void (*real)(unsigned, int, int) = NULL;
+  rgl("glDrawArrays", (void **)&real);
+  if (g_cur_fbo) g_draws_fbo++; else g_draws_screen++;
+  if (real) real(mode, first, cnt);
+}
+void dysmantle_draw_stats(void) {
+  fprintf(stderr, "[DRAWSTATS] fbo=%lu screen=%lu (cur_fbo=%u)\n",
+          g_draws_fbo, g_draws_screen, g_cur_fbo);
+}
+
+static void my_glFramebufferTexture2D(unsigned tgt, unsigned att, unsigned ttgt,
+                                      unsigned tex, int lvl) {
+  static void (*real)(unsigned, unsigned, unsigned, unsigned, int) = NULL;
+  rgl("glFramebufferTexture2D", (void **)&real);
+  if (real) real(tgt, att, ttgt, tex, lvl);
+  static int n = 0;
+  if (n < 30) { fprintf(stderr, "[FBO] FramebufferTexture2D att=0x%x tex=%u\n", att, tex); n++; }
+}
+static void my_glRenderbufferStorage(unsigned tgt, unsigned ifmt, int w, int h) {
+  static void (*real)(unsigned, unsigned, int, int) = NULL;
+  rgl("glRenderbufferStorage", (void **)&real);
+  if (real) real(tgt, ifmt, w, h);
+  static int n = 0;
+  if (n < 30) { fprintf(stderr, "[FBO] RenderbufferStorage ifmt=0x%x %dx%d\n", ifmt, w, h); n++; }
+}
+static unsigned my_glCheckFramebufferStatus(unsigned tgt) {
+  static unsigned (*real)(unsigned) = NULL;
+  rgl("glCheckFramebufferStatus", (void **)&real);
+  unsigned s = real ? real(tgt) : 0x8CD5;
+  static int n = 0;
+  if (s != 0x8CD5 /*COMPLETE*/ || n < 30) {
+    fprintf(stderr, "[FBO] CheckFramebufferStatus -> 0x%x %s\n", s,
+            s == 0x8CD5 ? "COMPLETE" : "INCOMPLETO!!!");
+    n++;
+  }
+  return s;
+}
+
 /* DIAG: força clear color (magenta) p/ distinguir branco-geometria de fundo */
 static void my_glClearColor(float r, float g, float b, float a) {
   static void (*real)(float, float, float, float) = NULL;
   rgl("glClearColor", (void **)&real);
-  if (getenv("DYSMANTLE_CLEAR_TEST")) { r = 1.0f; g = 0.0f; b = 1.0f; a = 1.0f; }
+  /* =1: tudo magenta. =2: só TELA (fbo 0) magenta. =3: só FBO magenta. */
+  const char *t = getenv("DYSMANTLE_CLEAR_TEST");
+  if (t) {
+    int m = atoi(t);
+    int hit = (m == 1) || (m == 2 && g_cur_fbo == 0) || (m == 3 && g_cur_fbo != 0);
+    if (hit) { r = 1.0f; g = 0.0f; b = 1.0f; a = 1.0f; }
+  }
   if (real) real(r, g, b, a);
 }
 
@@ -675,6 +739,12 @@ DynLibFunction dysmantle_overrides[] = {
   {"glCompressedTexImage2D", (uintptr_t)my_glCompressedTexImage2D},
   {"glTexParameteri", (uintptr_t)my_glTexParameteri},
   {"glClearColor", (uintptr_t)my_glClearColor},
+  {"glDrawArrays", (uintptr_t)my_glDrawArrays},
+  {"glDrawElements", (uintptr_t)my_glDrawElements},
+  {"glBindFramebuffer", (uintptr_t)my_glBindFramebuffer},
+  {"glCheckFramebufferStatus", (uintptr_t)my_glCheckFramebufferStatus},
+  {"glRenderbufferStorage", (uintptr_t)my_glRenderbufferStorage},
+  {"glFramebufferTexture2D", (uintptr_t)my_glFramebufferTexture2D},
   {"pthread_attr_setstacksize", (uintptr_t)my_attr_setstacksize},
   {"fopen", (uintptr_t)my_fopen},
   {"__stack_chk_fail", (uintptr_t)my_stack_chk_fail},
