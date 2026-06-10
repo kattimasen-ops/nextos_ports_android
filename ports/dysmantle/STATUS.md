@@ -3,7 +3,34 @@
 so-loader do `libNativeGame.so` (arm64) + `libc++_shared.so`. APK: DYSMANTLE 1.4.1.12 (modado "APK_Award").
 Device: Amlogic-old (S905X, Mali-450 Utgard, GLES2, fbdev), nextos-87.
 
-## 🎉 MARCO: RENDERER GLES2 100% INICIALIZADO + JOGO CARREGANDO TEXTURAS
+## 🏆 MARCO 2026-06-10: JOGO ABRIU NA TELA! "Program initialization OK. Running program"
+
+**CAUSA-RAIZ DO MURO FINAL (era TUDO o canary, não Squirrel/texturas!):**
+A engine (bionic) lê a stack-guard de **`tpidr_el0+0x28`** (bionic TLS_SLOT_STACK_GUARD)
+no prólogo e compara no epílogo. Sob glibc esse endereço caía no TLS de outra lib e
+**MUDAVA de valor no meio da função** (ex: errno durante pthread_create) → mismatch →
+`bl __stack_chk_fail`. Como o compilador trata __stack_chk_fail como **noreturn**, nosso
+no-op RETORNAVA e a execução **caía no código adjacente**: em `NXTI_CreateThread` o
+fall-through era a lambda de thread-entry (0x573f24) rodando NO PARENT com x0=lixo →
+`NXTI_InitializeThread(lixo)` → memcpy(0, lixo, 11) — o famoso "crash do Squirrel".
+("UI AUTOEXEC" no buffer e os frames SQLexer/SQCompiler eram lixo de stack = red herring.
+O autoexec.nut compilava OK; a thread "Loader" do ScreenLoading é que matava o parent.)
+
+**FIX = pad TLS no exe** (`main.c g_bionic_guard_pad[256]`, `_Thread_local aligned(16)`,
+NUNCA escrito): o 1º bloco TLS após o TCB (16 bytes) é do exe → tpidr+0x28 cai DENTRO do
+pad → valor estável (0) em toda thread → canary nunca mais dá mismatch (0 ocorrências de
+stack_chk_fail no run). Log de validação na partida: "TLS guard ... DENTRO ✓".
+
+**Diagnóstico que destravou:** crash handler com tabela de módulos (g_mods: game/libc++
+base+range, frames `game@vaddr`) + BRK-traps one-shot com tid+args na cadeia
+NXT_CreateThread→NXTI_CreateThread→thread_entry→InitializeThread. O frame #2
+`lr=0x573f24` (= retorno do `bl __stack_chk_fail` em 0x573f20) entregou o fall-through.
+
+**PRÓXIMOS PASSOS:** controles (Paddleboat falha -2002 → mapear input via shim/gptokeyb),
+áudio (Oboe→Null, sem som; avaliar opensles_shim/Oboe fix), estabilidade de gameplay,
+texturas in-game (validar ETC2 decodificadas), empacotar p/ ES + R2.
+
+## (histórico) MARCO 1: RENDERER GLES2 100% INICIALIZADO + JOGO CARREGANDO TEXTURAS
 
 ### O QUE FUNCIONA ✅ (evidência: gamedata/DYSMANTLE.log + run.log)
 1. **Loader 2-módulos** libc++_shared + libNativeGame, 379 ctors, JNI fake, SDL2.

@@ -33,6 +33,18 @@ extern const int dysmantle_overrides_count;
 extern DynLibFunction revc_pthread_table[];
 extern const int revc_pthread_count;
 
+/* 🩹 CANARY BIONIC (causa-raiz do "stack smash" falso): a engine lê a
+ * stack-guard de tpidr_el0+0x28 (bionic TLS_SLOT_STACK_GUARD). Sob glibc esse
+ * endereço cai no TLS de alguma lib e MUDA durante a execução (ex: errno em
+ * pthread_create) -> prólogo lê X, epílogo lê Y -> __stack_chk_fail. E como o
+ * compilador trata __stack_chk_fail como noreturn, nosso no-op RETORNAVA e a
+ * execução CAÍA no código adjacente (em NXTI_CreateThread caía na lambda de
+ * thread-entry rodando no parent com x0=lixo -> memcpy crash "n=11").
+ * FIX = reservar o início do TLS do exe (1º bloco após o TCB de 16 bytes,
+ * offset 16..272 c/ aligned(16)) com um pad NUNCA escrito -> tpidr+0x28 fica
+ * estável (zero) p/ toda thread -> canary nunca mais dá mismatch. */
+__attribute__((aligned(16))) static _Thread_local char g_bionic_guard_pad[256];
+
 static DynLibFunction *g_base;
 static int g_base_n;
 static void build_base_table(void) {
@@ -46,39 +58,70 @@ static void build_base_table(void) {
 static void resolve_addr(uintptr_t a, char *out, int outsz);
 static void brk_handler(int sig, siginfo_t *info, void *uc);
 static volatile uintptr_t g_load_base = 0; /* base do libNativeGame (vaddr 0) */
+
+/* tabela de módulos custom-loaded p/ simbolicação no crash: vaddr = addr-base.
+ * code_lo/hi = range do .text (vaddr) p/ filtrar retornos no stack scan. */
+static struct { const char *name; uintptr_t base; size_t size;
+                uintptr_t code_lo, code_hi; } g_mods[2];
+static int g_mods_n = 0;
+/* resolve addr -> "modname@0xvaddr" se cair num módulo nosso; senão maps */
+static void resolve_addr2(uintptr_t a, char *out, int outsz) {
+  for (int i = 0; i < g_mods_n; i++) {
+    if (a >= g_mods[i].base && a < g_mods[i].base + g_mods[i].size) {
+      snprintf(out, outsz, "%s@0x%lx", g_mods[i].name,
+               (unsigned long)(a - g_mods[i].base));
+      return;
+    }
+  }
+  resolve_addr(a, out, outsz);
+}
 static void crash_handler(int sig, siginfo_t *info, void *uc) {
   uintptr_t fault = (uintptr_t)info->si_addr;
   uintptr_t tb = (uintptr_t)text_base;
-  fprintf(stderr, "\n=== CRASH sig=%d addr=%p ===\n", sig, info->si_addr);
+  fprintf(stderr, "\n=== CRASH sig=%d addr=%p tid=%d ===\n", sig, info->si_addr,
+          (int)syscall(178));
+  { /* comm da thread que crashou */
+    int cfd = open("/proc/thread-self/comm", O_RDONLY);
+    if (cfd >= 0) { char cm[32]; int cn = read(cfd, cm, 31);
+      if (cn > 0) { cm[cn] = 0; fprintf(stderr, "  comm=%s", cm); }
+      close(cfd); }
+  }
   ucontext_t *u = (ucontext_t *)uc;
   uintptr_t pc = u->uc_mcontext.pc;
   char r[300];
-  resolve_addr(pc, r, sizeof(r));
+  resolve_addr2(pc, r, sizeof(r));
   fprintf(stderr, "  PC=%p %s\n", (void *)pc, r);
-  fprintf(stderr, "  x0=%lx x1=%lx x2=%lx x3=%lx x30=%lx\n",
-          (unsigned long)u->uc_mcontext.regs[0], (unsigned long)u->uc_mcontext.regs[1],
-          (unsigned long)u->uc_mcontext.regs[2], (unsigned long)u->uc_mcontext.regs[3],
-          (unsigned long)u->uc_mcontext.regs[30]);
-  { char rr[200]; resolve_addr(u->uc_mcontext.regs[30], rr, sizeof(rr));
+  for (int i = 0; i < 29; i += 4)
+    fprintf(stderr, "  x%-2d=%016lx x%-2d=%016lx x%-2d=%016lx x%-2d=%016lx\n",
+            i, (unsigned long)u->uc_mcontext.regs[i],
+            i+1, (unsigned long)u->uc_mcontext.regs[i+1],
+            i+2, (unsigned long)u->uc_mcontext.regs[i+2],
+            i+3, (unsigned long)u->uc_mcontext.regs[i+3]);
+  fprintf(stderr, "  sp=%lx\n", (unsigned long)u->uc_mcontext.sp);
+  { char rr[200]; resolve_addr2(u->uc_mcontext.regs[30], rr, sizeof(rr));
     fprintf(stderr, "  x30(LR) %s\n", rr); }
   uintptr_t fp = u->uc_mcontext.regs[29];
   for (int f = 0; f < 24 && fp; f++) {
     uintptr_t *p = (uintptr_t *)fp; uintptr_t next = p[0], lr = p[1];
     if (!lr) break;
-    resolve_addr(lr, r, sizeof(r));
+    resolve_addr2(lr, r, sizeof(r));
     fprintf(stderr, "  #%-2d lr %p %s\n", f, (void *)lr, r);
     if (next <= fp) break; fp = next;
   }
-  /* stack scan: acha retornos no .text do jogo (0x463000-0xd8e000) via g_load_base */
-  if (g_load_base) {
-    fprintf(stderr, "  --- stack scan (game) ---\n");
-    uintptr_t sp = u->uc_mcontext.sp, lb = g_load_base;
+  /* stack scan: retornos em qualquer módulo nosso (ordem = profundidade) */
+  if (g_mods_n) {
+    fprintf(stderr, "  --- stack scan (mods) ---\n");
+    uintptr_t sp = u->uc_mcontext.sp;
     int n = 0;
-    for (uintptr_t a = sp; a < sp + 0x3000 && n < 20; a += 8) {
+    for (uintptr_t a = sp; a < sp + 0x3000 && n < 28; a += 8) {
       uintptr_t v = *(uintptr_t *)a;
-      uintptr_t off = v - lb;
-      if (off >= 0x463000UL && off <= 0xd8e000UL) {
-        fprintf(stderr, "    +0x%lx\n", (unsigned long)off); n++;
+      for (int i = 0; i < g_mods_n; i++) {
+        uintptr_t off = v - g_mods[i].base;
+        if (off >= g_mods[i].code_lo && off <= g_mods[i].code_hi) {
+          fprintf(stderr, "    [sp+0x%lx] %s@0x%lx\n",
+                  (unsigned long)(a - sp), g_mods[i].name, (unsigned long)off);
+          n++;
+        }
       }
     }
   }
@@ -117,7 +160,7 @@ static void bt_handler(int sig, siginfo_t *info, void *uc) {
   ucontext_t *u = (ucontext_t *)uc;
   uintptr_t tb = (uintptr_t)text_base, pc = u->uc_mcontext.pc;
   char r[300];
-  resolve_addr(pc, r, sizeof(r));
+  resolve_addr2(pc, r, sizeof(r));
   fprintf(stderr, "\n[BT tid=%d] PC=%p %s", (int)syscall(178), (void *)pc, r);
   if (pc >= tb && pc < tb + text_size) fprintf(stderr, " {%s+0x%lx}", GAME_SO, (unsigned long)(pc - tb));
   fprintf(stderr, "\n");
@@ -125,7 +168,7 @@ static void bt_handler(int sig, siginfo_t *info, void *uc) {
   for (int f = 0; f < 28 && fp; f++) {
     uintptr_t *p = (uintptr_t *)fp; uintptr_t next = p[0], lr = p[1];
     if (!lr) break;
-    resolve_addr(lr, r, sizeof(r));
+    resolve_addr2(lr, r, sizeof(r));
     fprintf(stderr, "  #%-2d lr %p %s", f, (void *)lr, r);
     if (lr >= tb && lr < tb + text_size) fprintf(stderr, " {%s+0x%lx}", GAME_SO, (unsigned long)(lr - tb));
     fprintf(stderr, "\n");
@@ -245,7 +288,18 @@ static void brk_handler(int sig, siginfo_t *info, void *uc) {
         safe_str(u->uc_mcontext.regs[3], a3, sizeof(a3));
         fprintf(stderr, "[SQ] %s x1=\"%s\" x3=\"%s\"\n", nm, a1, a3);
       } else {
-        fprintf(stderr, "[BRK] %s  w0=0x%lx\n", nm, (unsigned long)u->uc_mcontext.regs[0]);
+        /* genérico: tid + x0..x2 + strings em x0/x1 + dump de 8 qwords em x0 */
+        uintptr_t x0 = u->uc_mcontext.regs[0], x1 = u->uc_mcontext.regs[1];
+        char s0[64], s1[64];
+        safe_str(x0, s0, sizeof(s0)); safe_str(x1, s1, sizeof(s1));
+        fprintf(stderr, "[BRK tid=%d] %s x0=0x%lx \"%s\" x1=0x%lx \"%s\" x2=0x%lx\n",
+                (int)syscall(178), nm, (unsigned long)x0, s0,
+                (unsigned long)x1, s1, (unsigned long)u->uc_mcontext.regs[2]);
+        if (x0 > 0x10000 && x0 < 0x8000000000UL) {
+          uintptr_t *q = (uintptr_t *)x0;
+          fprintf(stderr, "       [x0]: %lx %lx %lx %lx %lx %lx %lx %lx\n",
+                  q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7]);
+        }
       }
       fflush(stderr);
       uintptr_t pg = pc & ~0xFFFUL;
@@ -260,8 +314,13 @@ static void brk_handler(int sig, siginfo_t *info, void *uc) {
   _exit(133);
 }
 static void install_brk_traps(void) {
-  arm_brk(0x64454c, "SQ_compile");
-  arm_brk(0x667548, "SQ_compilebuffer");
+  /* cadeia de criação de thread nomeada (crash memcpy NULL n=11 "UI AUTOEXEC") */
+  arm_brk(0x5716b8, "NXT_CreateThread");        /* x0=nome, x1=func, x2=arg */
+  arm_brk(0x573e94, "NXTI_CreateThread");       /* x0=ThreadInfo* */
+  arm_brk(0x573f24, "thread_entry");            /* x0=ThreadInfo* (nova thread) */
+  arm_brk(0x571d9c, "NXTI_InitializeThread");   /* x0=ThreadInfo& */
+  arm_brk(0x75cbe4, "nString_Set");             /* x0=this(TLS emutls!), x1=src */
+  arm_brk(0x573f74, "SetThreadNamePlatform");   /* x0=data, x1=len */
 }
 
 /* GOT-hook de NXI_GetProductValue -> força opengl_version="2.0" (caminho ES2) */
@@ -296,12 +355,34 @@ static void load_module(const char *name, int heap_mb, DynLibFunction *tbl, int 
   so_flush_caches();
   so_execute_init_array();
   fprintf(stderr, "== %s: text=%p+%zu data=%p+%zu ==\n", name, text_base, text_size, data_base, data_size);
+  if (g_mods_n < 2) {
+    g_mods[g_mods_n].name = strstr(name, "c++") ? "libc++" : "game";
+    g_mods[g_mods_n].base = (uintptr_t)heap;
+    g_mods[g_mods_n].size = hs;
+    if (strstr(name, "c++")) { /* ranges .text (vaddr) dos ELFs */
+      g_mods[g_mods_n].code_lo = 0x9ecb0; g_mods[g_mods_n].code_hi = 0x1352f0;
+    } else {
+      g_mods[g_mods_n].code_lo = 0x463000; g_mods[g_mods_n].code_hi = 0xd8e000;
+    }
+    g_mods_n++;
+  }
 }
 
 int main(int argc, char *argv[]) {
   (void)argc; (void)argv;
   install_crash_handler();
   fprintf(stderr, "=== DYSMANTLE (Android) so-loader / NextOS aarch64 Mali-450 ===\n");
+
+  /* valida que tpidr_el0+0x28 (canary bionic) caiu DENTRO do nosso pad TLS */
+  { uintptr_t tp; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(tp));
+    uintptr_t slot = tp + 0x28, lo = (uintptr_t)g_bionic_guard_pad;
+    fprintf(stderr, "TLS guard: tpidr=0x%lx slot+0x28=0x%lx pad=[0x%lx..0x%lx] %s (val=0x%lx)\n",
+            (unsigned long)tp, (unsigned long)slot, (unsigned long)lo,
+            (unsigned long)(lo + sizeof(g_bionic_guard_pad)),
+            (slot >= lo && slot + 8 <= lo + sizeof(g_bionic_guard_pad))
+                ? "DENTRO ✓" : "FORA ⚠️ (canary instável!)",
+            *(unsigned long *)slot);
+  }
 
   jni_shim_set_package("com.dysmantle53.soco", 0);
 
@@ -363,7 +444,7 @@ int main(int argc, char *argv[]) {
    * dimensionado p/ ES2 -> stack smash no nosso contexto Utgard (ES2).
    * Forçamos "2.0" p/ alinhar a engine ao caminho ES2. */
   hook_getproductvalue();
-  // install_brk_traps();
+  install_brk_traps();
 
   /* registra o .eh_frame do jogo no unwinder C++: o módulo é custom-loaded (não
    * dlopen), então o unwinder não o conhece -> exceções (ex: falha de textura)
