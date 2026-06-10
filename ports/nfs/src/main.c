@@ -212,8 +212,23 @@ int main(int argc, char *argv[]) {
     uintptr_t tick = so_find_addr_safe("Java_com_ea_ironmonkey_RunLoop_nativeOnRunLoopTick");
     debugPrintf(">> entrando no render loop (tick=%p)\n", (void *)tick);
     int frames = getenv("NFS_FRAMES") ? atoi(getenv("NFS_FRAMES")) : 600;
+    int recov = getenv("NFS_TICKRECOVER") != NULL;
     for (int f = 0; f < frames && tick; f++) {
-      ((void(*)(void*,void*))tick)(env, fake_this);
+      if (recov) {
+        /* tick recuperável: se crashar, pula esse frame e continua (a engine
+         * pode avançar o estado/carregar assets nos frames seguintes) */
+        if (sigsetjmp(g_init_jmp, 1) == 0) {
+          g_init_armed = 1;
+          ((void(*)(void*,void*))tick)(env, fake_this);
+          g_init_armed = 0;
+        } else {
+          g_init_armed = 0;
+          if (f < 3 || g_init_skips < 8) debugPrintf("[frame %d CRASHOU -> pulado]\n", f);
+          g_init_skips++;
+        }
+      } else {
+        ((void(*)(void*,void*))tick)(env, fake_this);
+      }
       if (f < 5 || f % 60 == 0) debugPrintf("[frame %d]\n", f);
       usleep(16000);
     }

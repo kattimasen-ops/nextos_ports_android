@@ -107,6 +107,44 @@ static int my_pthread_create(void *th, const void *attr, void *(*fn)(void *), vo
   return real_pthread_create(th, attr, fn, arg);
 }
 
+/* ---- fopen/open hook: loga acessos a arquivo (ver se a engine abre o OBB) ---- */
+static void *(*real_fopen)(const char *, const char *);
+static void *my_fopen(const char *path, const char *mode) {
+  if (!real_fopen) real_fopen = (void *(*)(const char *, const char *))dlsym(RTLD_DEFAULT, "fopen");
+  void *fp = real_fopen(path, mode);
+  if (getenv("NFS_FOPENLOG")) {
+    static int n = 0;
+    if (n < 60) { fprintf(stderr, "[fopen] '%s' (%s) -> %s\n", path ? path : "?", mode ? mode : "?", fp ? "OK" : "MISS"); n++; }
+  }
+  return fp;
+}
+static int (*real_open)(const char *, int, ...);
+static int my_open(const char *path, int flags, ...) {
+  if (!real_open) real_open = (int (*)(const char *, int, ...))dlsym(RTLD_DEFAULT, "open");
+  int fd = real_open(path, flags, 0666);
+  if (getenv("NFS_FOPENLOG")) {
+    static int n = 0;
+    if (n < 60) { fprintf(stderr, "[open] '%s' -> %s\n", path ? path : "?", fd >= 0 ? "OK" : "MISS"); n++; }
+  }
+  return fd;
+}
+
+/* ---- dlsym hook: a engine pode dlsym funções math em runtime e chamá-las
+ * (softfp). Retornamos o wrapper softfp_resolve ANTES do dlsym real (senão
+ * pega a versão HARDFP do glibc → crash). NFS_DLSYMLOG=1 loga. ---- */
+extern void *softfp_resolve(const char *);
+static void *(*real_dlsym)(void *, const char *);
+static void *my_dlsym(void *handle, const char *name) {
+  if (!real_dlsym) real_dlsym = (void *(*)(void *, const char *))dlsym(RTLD_DEFAULT, "dlsym");
+  void *p = softfp_resolve(name);
+  if (!p) p = real_dlsym(handle, name);
+  if (getenv("NFS_DLSYMLOG")) {
+    static int n = 0;
+    if (n < 80) { fprintf(stderr, "[dlsym] '%s' -> %p%s\n", name ? name : "?", p, softfp_resolve(name) ? " (softfp)" : ""); n++; }
+  }
+  return p;
+}
+
 /* ---- stubs ---- */
 static int b_dso_handle;                       /* __dso_handle = endereço dummy */
 static void *b_cxa_type_match(void *a, void *b, char c) { (void)a; (void)b; (void)c; return (void *)0; }
@@ -140,6 +178,9 @@ DynLibFunction nfs_shims[] = {
     {"eglSurfaceAttrib", (uintptr_t)egl_shim_SurfaceAttrib},
     {"eglGetProcAddress", (uintptr_t)egl_shim_GetProcAddress},
     {"pthread_create", (uintptr_t)my_pthread_create},
+    {"dlsym", (uintptr_t)my_dlsym},
+    {"fopen", (uintptr_t)my_fopen},
+    {"open", (uintptr_t)my_open},
     {"malloc", (uintptr_t)pad_malloc},
     {"calloc", (uintptr_t)pad_calloc},
     {"realloc", (uintptr_t)pad_realloc},

@@ -33,17 +33,27 @@ enum {
   MID_UNKNOWN = 0,
   MID_GET_STORAGE_DIR,
   MID_GET_OBB_PATH,
+  MID_GET_ABS_PATH,
+  MID_GET_FILES_DIR,
   MID_GET_PACK_NAME,
   MID_SET_ACTIVITY,
   MID_ERROR_DIALOG,
   MID_GET_CLASS_LOADER,
   MID_LOAD_CLASS,
+  MID_IS_OBB,
+  MID_USE_ASSETS_FS,
+  MID_IS_FULL_APK,
+  MID_GET_ASSET_SIZE,
   MID_GENERIC,
   FID_OBB_VERSIONCODE,
+  FID_WIDTH,
+  FID_HEIGHT,
+  FID_DENSITY,
+  FID_DENSITY_DPI,
   FID_GENERIC,
 };
 
-static int g_method_tags[16]; /* unique addresses used as method IDs */
+static int g_method_tags[32]; /* unique addresses used as method IDs */
 
 /* ---- Configurable package/OBB ---- */
 static const char *g_package_name = "com.microids.syberia";
@@ -107,9 +117,20 @@ static void *jni_GetMethodID(void *env, void *clazz, const char *name,
     return &g_method_tags[MID_GET_CLASS_LOADER];
   if (strcmp(name, "loadClass") == 0)
     return &g_method_tags[MID_LOAD_CLASS];
-  /* NFS: paths de storage/OBB (instância) */
+  /* NFS: cadeia de path storage/OBB. getExternalStorageDirectory()/getFilesDir()
+   * retornam um File; getAbsolutePath() nele → a String do path. */
   if (strstr(name, "ObbFullPath") || strstr(name, "ObbPath"))
     return &g_method_tags[MID_GET_OBB_PATH];
+  if (strstr(name, "getAbsolutePath") || strstr(name, "getPath") || strstr(name, "getCanonicalPath"))
+    return &g_method_tags[MID_GET_ABS_PATH];
+  if (strstr(name, "getFilesDir"))
+    return &g_method_tags[MID_GET_FILES_DIR];
+  if (strcmp(name, "getPackageName") == 0 || strcmp(name, "getPackName") == 0)
+    return &g_method_tags[MID_GET_PACK_NAME];
+  if (strcmp(name, "isObbAssets") == 0) return &g_method_tags[MID_IS_OBB];
+  if (strcmp(name, "useAssetsFileSystem") == 0) return &g_method_tags[MID_USE_ASSETS_FS];
+  if (strcmp(name, "isFullApkAssets") == 0) return &g_method_tags[MID_IS_FULL_APK];
+  if (strcmp(name, "getAssetSize") == 0) return &g_method_tags[MID_GET_ASSET_SIZE];
   if (strstr(name, "ExternalStorageDirectory") || strstr(name, "StorageDirectory") ||
       strstr(name, "StorageDir"))
     return &g_method_tags[MID_GET_STORAGE_DIR];
@@ -141,7 +162,25 @@ static void *jni_GetFieldID(void *env, void *clazz, const char *name,
   (void)env;
   (void)clazz;
   debugPrintf("jni_shim: GetFieldID(%s, %s)\n", name, sig);
+  if (strcmp(name, "widthPixels") == 0) return &g_method_tags[FID_WIDTH];
+  if (strcmp(name, "heightPixels") == 0) return &g_method_tags[FID_HEIGHT];
+  if (strcmp(name, "density") == 0) return &g_method_tags[FID_DENSITY];
+  if (strcmp(name, "densityDpi") == 0) return &g_method_tags[FID_DENSITY_DPI];
   return &g_method_tags[FID_GENERIC];
+}
+
+/* GetIntField/GetFloatField: tela 1280x720, densidade 2.0/320dpi */
+static jint jni_GetIntField(void *env, void *obj, void *fid) {
+  (void)env; (void)obj;
+  if (fid == &g_method_tags[FID_WIDTH]) return 1280;
+  if (fid == &g_method_tags[FID_HEIGHT]) return 720;
+  if (fid == &g_method_tags[FID_DENSITY_DPI]) return 320;
+  return 0;
+}
+static float jni_GetFloatField(void *env, void *obj, void *fid) {
+  (void)env; (void)obj;
+  if (fid == &g_method_tags[FID_DENSITY]) return 2.0f;
+  return 0.0f;
 }
 
 static void *jni_GetStaticFieldID(void *env, void *clazz, const char *name,
@@ -178,6 +217,20 @@ static void *jni_CallObjectMethod(void *env, void *obj, void *methodID, ...) {
     debugPrintf("jni_shim: CallObjectMethod -> obbPath = %s\n", nfs_obb_path());
     return make_jstring(nfs_obb_path());
   }
+  if (methodID == &g_method_tags[MID_GET_FILES_DIR]) {
+    static char fd[512]; snprintf(fd, sizeof(fd), "%s/files", nfs_data_dir());
+    debugPrintf("jni_shim: CallObjectMethod -> filesDir = %s\n", fd);
+    return make_jstring(fd);
+  }
+  if (methodID == &g_method_tags[MID_GET_ABS_PATH]) {
+    /* getAbsolutePath() do File: o 'obj' (File) já é nosso jstring do path */
+    debugPrintf("jni_shim: CallObjectMethod -> getAbsolutePath = %s\n", resolve_jstring(obj));
+    return obj;
+  }
+  if (methodID == &g_method_tags[MID_GET_PACK_NAME]) {
+    debugPrintf("jni_shim: CallObjectMethod -> packageName = %s\n", g_package_name);
+    return make_jstring(g_package_name);
+  }
   debugPrintf("jni_shim: CallObjectMethod(mid=%p)\n", methodID);
   static int fake_obj;
   return &fake_obj;
@@ -188,8 +241,11 @@ static unsigned char jni_CallBooleanMethod(void *env, void *obj,
                                            void *methodID, ...) {
   (void)env;
   (void)obj;
-  (void)methodID;
-  return 0;
+  if (methodID == &g_method_tags[MID_IS_OBB]) {
+    debugPrintf("jni_shim: isObbAssets -> 1\n");
+    return 1; /* assets estão no OBB */
+  }
+  return 0; /* useAssetsFileSystem/isFullApkAssets -> 0 */
 }
 
 /* CallIntMethod (index 61) */
@@ -460,6 +516,8 @@ void jni_shim_init(void **out_vm, void **out_env) {
   jni_env_vtable[61] = (uintptr_t)jni_CallVoidMethod;
   jni_env_vtable[62] = (uintptr_t)jni_CallVoidMethod;      /* V */
   jni_env_vtable[94] = (uintptr_t)jni_GetFieldID;
+  jni_env_vtable[100] = (uintptr_t)jni_GetIntField;
+  jni_env_vtable[102] = (uintptr_t)jni_GetFloatField;
   jni_env_vtable[113] = (uintptr_t)jni_GetStaticMethodID;
   jni_env_vtable[114] = (uintptr_t)jni_CallStaticObjectMethod;
   jni_env_vtable[115] = (uintptr_t)jni_CallStaticObjectMethod; /* V */

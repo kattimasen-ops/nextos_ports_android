@@ -401,11 +401,14 @@ int so_resolve(DynLibFunction *funcs, int num_funcs,
               }
             }
             if (!found) {
-              /* fallback: resolve da glibc/libs linkadas no loader (libc, m,
-               * dl, pthread, SDL2, EGL, GLESv2) — cobre os ~188 libc/GLES
-               * triviais sem listar cada um. A TABELA tem prioridade (shims
-               * nossos vencem); só cai aqui o que a tabela não tem. */
-              void *p = dlsym(RTLD_DEFAULT, name);
+              /* softfp_shim: a engine é SOFTFP (double/float em regs inteiros);
+               * o glibc libm é HARDFP. Intercepta as funções math com wrappers
+               * pcs("aapcs") ANTES do dlsym (senão modf/pow/etc. crasham). */
+              extern void *softfp_resolve(const char *);
+              void *p = softfp_resolve(name);
+              /* fallback geral: glibc/libs linkadas (libc, m, dl, pthread, SDL2,
+               * EGL, GLESv2). A TABELA tem prioridade (shims nossos vencem). */
+              if (!p) p = dlsym(RTLD_DEFAULT, name);
               if (p) { *ptr = (uintptr_t)p; found = 1; }
             }
             if (!found)
