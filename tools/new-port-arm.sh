@@ -82,38 +82,59 @@ mkdir -p "$OUT/src"
 cp "$CORE"/*.c "$CORE"/*.h "$OUT/src/" 2>/dev/null || true
 cp "$TEMPLATE"/src/*.c "$TEMPLATE"/src/*.h "$OUT/src/" 2>/dev/null || true
 # >>> troca o so_util arm64 pelo ARMHF <<<
-cp "$ARM_SO_UTIL" "$OUT/src/so_util.c"
+if [ -f "$HERE/template-arm/so_util.c" ]; then cp "$HERE/template-arm/so_util.c" "$OUT/src/so_util.c"; else cp "$ARM_SO_UTIL" "$OUT/src/so_util.c"; fi
 echo ">> so_util ARMHF instalado ($ARM_SO_UTIL)"
 
 SONAME="$(basename "$SO")"
 GEN="$OUT/src/imports.gen.c"
+# imports.gen.c MÍNIMO: resolução real = fallback dlsym (so_resolve) + shims
+# bionic (src/imports.c). A tabela só precisa de uma sentinela; libc/GLES/EGL/
+# pthread/abi resolvem da glibc+libs linkadas, e o que faltar vira UNRESOLVED
+# no 1º run -> entra em src/imports.c (padrão NFS/DYSMANTLE).
 {
   echo "// imports.gen.c — GERADO por new-port-arm.sh para '$PORT' ($SONAME)"
-  echo "// $TOTAL simbolos. Resolva os UNKNOWN no fim do arquivo."
+  echo "// $TOTAL imports. Resolução: fallback dlsym + src/imports.c (shims)."
   echo '#include "imports.h"'
   echo '#include "so_util.h"'
   echo '#include <stdio.h>'
   echo
+  echo "FILE *stderr_fake;"
   echo "DynLibFunction dynlib_functions[] = {"
-  for s in $(printf '%s\n' "${!CAT[@]}" | sort); do
-    c="${CAT[$s]}"
-    case "$c" in
-      pass|gles|liblog|cxx|abi) echo "  {\"$s\", (uintptr_t)&$s},  // $c" ;;
-      pthread)  echo "  {\"$s\", (uintptr_t)&${s}_fake},  // pthread wrapper (core)" ;;
-      egl)      echo "  {\"$s\", (uintptr_t)&${s}_shim},  // egl_shim" ;;
-      opensles) echo "  {\"$s\", (uintptr_t)&${s}_shim},  // opensles_shim" ;;
-      android|jni) : ;;
-      UNKNOWN)  echo "  // TODO {\"$s\", (uintptr_t)&stub_$s},  // <<< IMPLEMENTAR" ;;
-    esac
-  done
+  echo "    {\"__${PORT}_dummy__\", 0}, /* sentinela; resolução real = dlsym+imports.c */"
   echo "};"
-  echo "const int dynlib_functions_count = sizeof(dynlib_functions)/sizeof(dynlib_functions[0]);"
+  echo "size_t dynlib_numfunctions = sizeof(dynlib_functions)/sizeof(dynlib_functions[0]);"
   echo
-  echo "// ===================== SIMBOLOS A IMPLEMENTAR (UNKNOWN) ====================="
+  echo "// ============ referência: imports por categoria (do recon) ============"
   for s in $(printf '%s\n' "${!CAT[@]}" | sort); do
-    [ "${CAT[$s]}" = "UNKNOWN" ] && echo "//   $s"
+    echo "//   ${CAT[$s]}  $s"
   done
 } > "$GEN"
+
+# ---- arquivos ARMHF COMPLETOS (templates comprovados no port NFS) ----
+TPL="$HERE/template-arm"
+if [ -d "$TPL" ]; then
+  SECS=()
+  if [ "${#SOS[@]}" -gt 0 ]; then
+    for x in "${SOS[@]}"; do bn="$(basename "$x")"; [ "$bn" = "$SONAME" ] && continue
+      if [ "$bn" = "libc++_shared.so" ]; then SECS=("$bn" "${SECS[@]}"); else SECS+=("$bn"); fi; done
+  fi
+  LOADM=""; SECLIST=""
+  for m in "${SECS[@]}"; do
+    case "$m" in libc++_shared.so) mb=24;; *) mb=8;; esac
+    LOADM="$LOADM  if (load_module(\"$m\", $mb, 1) < 0) return 1;\n"
+    SECLIST="$SECLIST $m"
+  done
+  [ -z "$LOADM" ] && LOADM="  /* (sem .so secundárias) */\n"
+  sed -e "s|@SO_NAME@|$SONAME|g" -e "s|@PORT_NAME@|$PORT|g" \
+      -e "s|@SECONDARY_SOS@|${SECLIST# }|g" "$TPL/main.c.tmpl" > "$OUT/src/main.c"
+  awk -v L="$LOADM" '/@LOAD_MODULES@/{printf "%s",L;next}1' "$OUT/src/main.c" > "$OUT/src/main.c.x" \
+    && mv "$OUT/src/main.c.x" "$OUT/src/main.c"
+  cp "$TPL/imports-shims.c" "$OUT/src/imports.c"
+  cp "$TPL/so_util.h" "$OUT/src/so_util.h"  # header c/ so_snapshot_symbols
+  sed -e "s|@PORT@|$PORT|g" "$TPL/build.sh.tmpl" > "$OUT/build.sh" && chmod +x "$OUT/build.sh"
+  echo ">> ARMHF completo: main.c multi-módulo + imports.c (shims bionic) + build.sh (toolchain NextOS)"
+  echo "   .so secundárias:${SECLIST:- nenhuma}"
+fi
 
 echo
 echo "==================== RELATORIO ARMHF: $PORT ===================="
