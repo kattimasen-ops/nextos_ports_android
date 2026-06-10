@@ -902,6 +902,44 @@ static void my_stack_chk_fail(void) {
   /* retorna em vez de abort */
 }
 
+/* ---------- _ctype_ (tabela BSD/bionic de classes de caractere) ----------
+ * libunity (bionic) importa `_ctype_` — uma `const char*` que aponta p/ uma tabela
+ * de 257 bytes; isalpha/isdigit/tolower fazem `_ctype_[(int)c+1] & BITS`. O glibc
+ * NÃO exporta `_ctype_` → ficava UNRESOLVED (NULL) → o processamento de string do
+ * engine (nomes de asset etc.) fazia `ldr [_ctype_]; ldr [x0]` = NULL deref (crash
+ * libunity+0xe449d4 no asset loading). Provemos a tabela (preenchida via glibc) e
+ * resolvemos o símbolo. Bits bionic: _U=1 _L=2 _N=4 _S=8 _P=0x10 _C=0x20 _X=0x40 _B=0x80. */
+#include <ctype.h>
+static unsigned char g_ctype_table[257];
+static const unsigned char *g_ctype_ptr = g_ctype_table;  /* _ctype_ aponta p/ a base; idx [c+1] */
+static unsigned char g_tolower_table[257], g_toupper_table[257];
+static const unsigned char *g_tolower_ptr = g_tolower_table, *g_toupper_ptr = g_toupper_table;
+static void ctype_init(void) {
+  g_ctype_table[0] = 0;                 /* slot do EOF (c=-1) */
+  g_tolower_table[0] = 0; g_toupper_table[0] = 0;
+  for (int c = 0; c < 256; c++) {
+    unsigned char b = 0;
+    if (isupper(c)) b |= 0x01;          /* _U */
+    if (islower(c)) b |= 0x02;          /* _L */
+    if (isdigit(c)) b |= 0x04;          /* _N */
+    if (isspace(c)) b |= 0x08;          /* _S */
+    if (ispunct(c)) b |= 0x10;          /* _P */
+    if (iscntrl(c)) b |= 0x20;          /* _C */
+    if (isxdigit(c) && !isdigit(c)) b |= 0x40; /* _X (só hex-letra; dígitos já têm _N) */
+    if (c == ' ')  b |= 0x80;           /* _B (blank imprimível) */
+    g_ctype_table[c + 1] = b;
+    g_tolower_table[c + 1] = (unsigned char)tolower(c);
+    g_toupper_table[c + 1] = (unsigned char)toupper(c);
+  }
+}
+/* resolve _ctype_/_tolower_tab_/_toupper_tab_ na GOT do módulo ATIVO. A GOT guarda
+ * o ENDEREÇO da variável-ponteiro (code: ldr [got]→ptr_var; ldr [ptr_var]→tabela). */
+static void ctype_resolve(void) {
+  so_patch_got("_ctype_", (uintptr_t)&g_ctype_ptr);
+  so_patch_got("_tolower_tab_", (uintptr_t)&g_tolower_ptr);
+  so_patch_got("_toupper_tab_", (uintptr_t)&g_toupper_ptr);
+}
+
 /* ---------- helper: override import na tabela ---------- */
 static void set_import(const char *name, void *fn) {
   for (size_t i = 0; i < dynlib_numfunctions; i++)
@@ -1147,6 +1185,7 @@ int main(int argc, char **argv) {
 
   fprintf(stderr, "[F0] resolvendo %zu imports...\n", dynlib_numfunctions);
   if (so_resolve(dynlib_functions, dynlib_numfunctions, 0) < 0) { fprintf(stderr, "resolve FALHOU\n"); return 1; }
+  ctype_init(); ctype_resolve();   /* _ctype_/_tolower_tab_/_toupper_tab_ (bionic) p/ libunity */
   /* PATCH-GOT: os imports NDK nao estao em dynlib_functions -> set_import foi
    * no-op e ficaram UNRESOLVED (GOT lixo). Sobrescreve os slots DIRETO. */
   patch_got("ANativeWindow_fromSurface", (void *)my_aw_fromSurface);
@@ -1311,6 +1350,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[F1] libil2cpp: text=%p+%zu\n", text_base, text_size);
     so_relocate();
     so_resolve(dynlib_functions, dynlib_numfunctions, 0);
+    ctype_resolve();   /* _ctype_/_tolower_tab_/_toupper_tab_ p/ libil2cpp tb */
     /* il2cpp abre o global-metadata.dat via open() -> intercepta p/ redirecionar.
        patch_got opera no modulo ATIVO (=il2cpp agora). Tb dlopen/dlsym/log. */
     patch_got("open", (void *)my_open);
