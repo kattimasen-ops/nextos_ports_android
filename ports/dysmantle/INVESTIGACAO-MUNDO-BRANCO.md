@@ -197,3 +197,23 @@ tiles ou lookup que aponta pro tile errado/cinza no nosso ambiente.
 em vez da grama verde). É um bug fundo do pipeline de terreno do DYSMANTLE (atlas/tile lookup),
 nível Hollow Knight de dificuldade. Jogo segue 100% jogável (imagem+som+controle), só o visual do
 chão washed-white. Infra de diag toda env-gated; TINT_GREEN/STRIDEFIX off por default.
+
+## 🔄 SESSÃO 3 — CORREÇÃO: tex23=máquina, chão é UNDRAWN (volta pro format-0)
+- Salvei as imagens das texturas (DYSMANTLE_TEX_LOG=1 DYSMANTLE_TEX_SAVE=1 → texdump_*.raw).
+  **tex23 = atlas de peças da MÁQUINA/bonker** (engrenagens/canos cinza+vermelho), NÃO o chão!
+  tex9=fumaça(blobs), tex11=grunge, tex19=splash art. NENHUMA textura verde de terreno carrega.
+- **clr3 já provava: 60% do FBO = cor de clear (undrawn).** Então o "chão branco" é o CLEAR do
+  FBO, não uma textura cinza. O terreno **não desenha** (geometria format-0 falha).
+- **TEORIA DO USUÁRIO (validada):** os que somem (chão, árvores, barris, cabeça, armas) são
+  objetos COMPLEXOS (destrutíveis/animados/skinned) que usam o caminho de vertex-stream
+  format-0/objeto que falha. Os que desenham (bonker=tex23, corpo do player, HUD) são meshes
+  simples. → **UMA causa: a classe de geometria com streams em OBJETO (verts@8) + format 0.**
+- Detalhe do objeto: entry verts@8 aponta p/ {field0=ponteiro 0x7f.., ...} = OBJETO (não float
+  cru). createvb trata como raw → lixo. entry @4=0x7F (formato real). Working surfaces: verts@8
+  NULL (data dos streams). Broken: verts@8=objeto (data dentro).
+- Blend aditivo existe (SRC_ALPHA,ONE); NO_ADD reduz branco 0.58→0.477 (luz/sol contribui pouco).
+
+**PRÓXIMO (caminho de geometria que falha):** entender o OBJETO em verts@8 (field0=ptr p/ floats?)
+e fazer createvb/GenerateStreamData extrair os dados certos quando format-0/objeto. OU achar onde
+o entry+0 (formato) deveria ser escrito (é 0; deveria ser e[4]=0x7F) ANTES de AllocateVertexStreams,
+p/ os streams alocarem e a geometria preencher. Comparável a Hollow Knight em dificuldade.

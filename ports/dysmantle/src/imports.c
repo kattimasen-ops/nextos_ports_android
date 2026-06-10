@@ -661,6 +661,36 @@ static void my_glBufferData(unsigned tgt, long size, const void *data, unsigned 
   }
 }
 
+/* DIAG luz/sol: loga blends usados + permite forçar/desligar passes aditivos
+ * (luz do player/sol estourada lavando o terreno de branco). */
+static void my_glBlendFunc(unsigned sf, unsigned df) {
+  static void (*real)(unsigned, unsigned) = NULL; rgl("glBlendFunc", (void **)&real);
+  static int seen[64]; static int sn = 0;
+  if (getenv("DYSMANTLE_BLEND_LOG")) {
+    int key = (sf<<16)|df, known=0;
+    for (int i=0;i<sn;i++) if(seen[i]==key){known=1;break;}
+    if(!known && sn<64){seen[sn++]=key; fprintf(stderr,"[BLEND] src=0x%x dst=0x%x\n",sf,df);}
+  }
+  /* =1: troca aditivo (ONE,ONE / SRC_ALPHA,ONE) por alpha normal (teste luz) */
+  if (getenv("DYSMANTLE_NO_ADD")) {
+    if ((sf==1 && df==1) || (sf==0x302 && df==1)) { sf=0x302; df=0x303; } /* SRC_ALPHA,1-SRC_ALPHA */
+  }
+  if (real) real(sf, df);
+}
+static void my_glBlendFuncSeparate(unsigned sf, unsigned df, unsigned sa, unsigned da) {
+  static void (*real)(unsigned, unsigned, unsigned, unsigned) = NULL;
+  rgl("glBlendFuncSeparate", (void **)&real);
+  static int seen[64]; static int sn = 0;
+  if (getenv("DYSMANTLE_BLEND_LOG")) {
+    int key = (sf<<16)|df, known=0;
+    for (int i=0;i<sn;i++) if(seen[i]==key){known=1;break;}
+    if(!known && sn<64){seen[sn++]=key; fprintf(stderr,"[BLENDSEP] src=0x%x dst=0x%x srcA=0x%x dstA=0x%x\n",sf,df,sa,da);}
+  }
+  if (getenv("DYSMANTLE_NO_ADD")) {
+    if ((sf==1 && df==1) || (sf==0x302 && df==1)) { sf=0x302; df=0x303; }
+  }
+  if (real) real(sf, df, sa, da);
+}
 /* DIAG depth: força glDepthFunc=ALWAYS (depth-texture FBO quebrado no Utgard?
  * → mundo culado). DYSMANTLE_DEPTH_ALWAYS=1. =2 desliga depth test inteiro. */
 static void my_glDepthFunc(unsigned f) {
@@ -751,6 +781,16 @@ static void my_glTexImage2D(unsigned tgt, int lvl, int ifmt, int w, int h,
     }
     static int n = 0;
     unsigned tid = g_bound_tex[g_active_unit < 8 ? g_active_unit : 0];
+    /* salva a imagem inteira de texturas grandes p/ inspeção (DYSMANTLE_TEX_SAVE) */
+    if (px && lvl == 0 && getenv("DYSMANTLE_TEX_SAVE") && w >= 128 && h >= 128 && fmt == 0x1908) {
+      static int sv = 0;
+      if (sv < 80) {
+        char nm[80]; snprintf(nm, sizeof(nm), "texdump_t%u_%dx%d.raw", tid, w, h);
+        FILE *tf = fopen(nm, "wb");
+        if (tf) { fwrite(px, 1, (size_t)w*h*4, tf); fclose(tf);
+          fprintf(stderr, "[TEXSAVE] %s\n", nm); sv++; }
+      }
+    }
     if (px && lvl == 0 && w >= 64 && h >= 64 && fmt == 0x1908) {
       const unsigned char *b = (const unsigned char *)px;
       char grid[160]; int gi = 0; int colorful = 0;
@@ -1056,6 +1096,8 @@ DynLibFunction dysmantle_overrides[] = {
   {"glCompressedTexImage2D", (uintptr_t)my_glCompressedTexImage2D},
   {"glTexParameteri", (uintptr_t)my_glTexParameteri},
   {"glClearColor", (uintptr_t)my_glClearColor},
+  {"glBlendFunc", (uintptr_t)my_glBlendFunc},
+  {"glBlendFuncSeparate", (uintptr_t)my_glBlendFuncSeparate},
   {"glBindBuffer", (uintptr_t)my_glBindBuffer},
   {"glUseProgram", (uintptr_t)my_glUseProgram},
   {"glBufferData", (uintptr_t)my_glBufferData},
