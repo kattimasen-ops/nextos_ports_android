@@ -381,6 +381,70 @@ static void my_glTexStorage2D(unsigned tgt, int lvls, unsigned ifmt, int w,
 /* glTexImage2D: loga ifmt/fmt/type/dim + erro GL. ifmt GLES3 (ex: GL_RGBA8
  * 0x8058, GL_SRGB8 0x8C41, sized) NÃO existe no GLES2 → INVALID_ENUM →
  * textura branca. GLES2 quer ifmt = base (GL_RGBA 0x1908) sem sized. */
+/* trace de binding de textura no momento do draw */
+static unsigned g_active_unit = 0, g_bound_tex[8] = {0};
+static void my_glActiveTexture(unsigned tex) {
+  static void (*real)(unsigned) = NULL; rgl("glActiveTexture", (void **)&real);
+  g_active_unit = tex - 0x84C0; /* GL_TEXTURE0 */
+  if (g_active_unit >= 8) g_active_unit = 0;
+  if (real) real(tex);
+}
+static void my_glBindTexture(unsigned tgt, unsigned tex) {
+  static void (*real)(unsigned, unsigned) = NULL; rgl("glBindTexture", (void **)&real);
+  if (g_active_unit < 8) g_bound_tex[g_active_unit] = tex;
+  if (real) real(tgt, tex);
+}
+static void my_glUniform1i(int loc, int v) {
+  static void (*real)(int, int) = NULL; rgl("glUniform1i", (void **)&real);
+  static int n = 0;
+  if (getenv("DYSMANTLE_UNIF_LOG") && n < 50) {
+    fprintf(stderr, "[UNIF1i] loc=%d val=%d\n", loc, v); n++;
+  }
+  if (real) real(loc, v);
+}
+static int my_glGetUniformLocation(unsigned prog, const char *nm) {
+  static int (*real)(unsigned, const char *) = NULL;
+  rgl("glGetUniformLocation", (void **)&real);
+  int r = real ? real(prog, nm) : -1;
+  static int n = 0;
+  if (getenv("DYSMANTLE_UNIF_LOG") && n < 50 && nm && strstr(nm, "tex")) {
+    fprintf(stderr, "[UNIFLOC] %s -> loc %d (prog %u)\n", nm, r, prog); n++;
+  }
+  return r;
+}
+static void my_glBindAttribLocation(unsigned prog, unsigned idx, const char *nm) {
+  static void (*real)(unsigned, unsigned, const char *) = NULL;
+  rgl("glBindAttribLocation", (void **)&real);
+  static int n = 0;
+  if (getenv("DYSMANTLE_ATTR_LOG") && n < 30) {
+    fprintf(stderr, "[BINDATTR] %s -> loc %u\n", nm ? nm : "?", idx); n++;
+  }
+  if (real) real(prog, idx, nm);
+}
+
+/* trace de atributos de vértice (UVs erradas → textura amostra canto = branco) */
+static void my_glVertexAttribPointer(unsigned idx, int sz, unsigned typ,
+                                     unsigned char norm, int stride, const void *ptr) {
+  static void (*real)(unsigned, int, unsigned, unsigned char, int, const void *) = NULL;
+  rgl("glVertexAttribPointer", (void **)&real);
+  static int n = 0;
+  if (getenv("DYSMANTLE_ATTR_LOG") && n < 40) {
+    fprintf(stderr, "[ATTR] idx=%u size=%d type=0x%x norm=%d stride=%d off=%ld\n",
+            idx, sz, typ, norm, stride, (long)(uintptr_t)ptr); n++;
+  }
+  if (real) real(idx, sz, typ, norm, stride, ptr);
+}
+static int my_glGetAttribLocation(unsigned prog, const char *name) {
+  static int (*real)(unsigned, const char *) = NULL;
+  rgl("glGetAttribLocation", (void **)&real);
+  int r = real ? real(prog, name) : -1;
+  static int n = 0;
+  if (getenv("DYSMANTLE_ATTR_LOG") && n < 40) {
+    fprintf(stderr, "[ATTRLOC] %s -> %d\n", name ? name : "?", r); n++;
+  }
+  return r;
+}
+
 /* ---- FBO diag (render-to-texture do mundo: incompleto no Mali → branco) ---- */
 static unsigned g_cur_fbo = 0;
 static unsigned long g_draws_fbo = 0, g_draws_screen = 0;
@@ -398,6 +462,14 @@ static void my_glDrawElements(unsigned mode, int cnt, unsigned typ, const void *
   if ((++t % 3000) == 0)
     fprintf(stderr, "[DRAWSTATS] fbo=%lu screen=%lu (cur_fbo=%u)\n",
             g_draws_fbo, g_draws_screen, g_cur_fbo);
+  if (getenv("DYSMANTLE_DRAW_LOG")) {
+    static int dn = 0;
+    if (g_draws_fbo > 100 && dn < 25) { /* draws de gameplay (dentro do FBO) */
+      fprintf(stderr, "[DRAW] cnt=%d unit=%u tex[0]=%u tex[1]=%u fbo=%u\n",
+              cnt, g_active_unit, g_bound_tex[0], g_bound_tex[1], g_cur_fbo);
+      dn++;
+    }
+  }
   if (real) real(mode, cnt, typ, idx);
 }
 static void my_glDrawArrays(unsigned mode, int first, int cnt) {
@@ -461,6 +533,10 @@ static void my_glTexParameteri(unsigned tgt, unsigned pname, int param) {
   static void (*real)(unsigned, unsigned, int) = NULL;
   rgl("glTexParameteri", (void **)&real);
   if (g_npot_fix < 0) g_npot_fix = getenv("DYSMANTLE_NPOT_OFF") ? 0 : 1;
+  static int n = 0;
+  if (getenv("DYSMANTLE_TEXPARAM_LOG") && n < 40) {
+    fprintf(stderr, "[TEXPARAM] pname=0x%x param=0x%x\n", pname, param); n++;
+  }
   if (g_npot_fix) {
     if (pname == 0x2802 /*WRAP_S*/ || pname == 0x2803 /*WRAP_T*/)
       param = 0x812F; /* CLAMP_TO_EDGE */
@@ -500,8 +576,16 @@ static void my_glTexImage2D(unsigned tgt, int lvl, int ifmt, int w, int h,
   if (g_tex_log) {
     static int n = 0;
     if (n < 60 || e) {
-      fprintf(stderr, "[TEX2D] ifmt=0x%x(orig0x%x) %dx%d fmt=0x%x typ=0x%x lvl=%d -> err=0x%x\n",
-              ifmt, orig, w, h, fmt, typ, lvl, e); n++;
+      /* amostra alguns pixels p/ ver se os DADOS são brancos ou reais */
+      char pix[80] = "(null)";
+      if (px && lvl == 0 && w >= 4 && h >= 4) {
+        const unsigned char *b = (const unsigned char *)px;
+        long mid = ((long)h / 2 * w + w / 2) * 4;
+        snprintf(pix, sizeof(pix), "p0=%02x%02x%02x%02x mid=%02x%02x%02x%02x",
+                 b[0], b[1], b[2], b[3], b[mid], b[mid+1], b[mid+2], b[mid+3]);
+      }
+      fprintf(stderr, "[TEX2D] ifmt=0x%x %dx%d fmt=0x%x typ=0x%x -> err=0x%x %s\n",
+              ifmt, w, h, fmt, typ, e, pix); n++;
     }
   }
 }
@@ -616,20 +700,22 @@ static void my_glShaderSource(unsigned sh, int count, const char *const *str,
       fprintf(stderr, "%.*s", len && len[i] > 0 ? len[i] : 2000, str[i]);
     fprintf(stderr, "\n[/SHADER src #%u]\n", sh);
   }
-  /* DIAG: força fragment shaders do sprite a sair VERMELHO sólido p/ localizar
-   * a geometria. Reescreve atribuições conhecidas de gl_FragColor. */
-  if (count == 1 && getenv("DYSMANTLE_SHADER_RED")) {
+  /* DIAG: reescreve o fim do fragment shader. RED=vermelho sólido (localiza
+   * geometria). TEX=só a textura (sem _vary_color, p/ ver se a cor lava). */
+  const char *inj = NULL;
+  if (getenv("DYSMANTLE_SHADER_RED")) inj = "gl_FragColor=vec4(1.0,0.0,0.0,1.0);}";
+  else if (getenv("DYSMANTLE_SHADER_TEX")) inj = "gl_FragColor=texture2D(_tex_diffuse,_vary_texture_coordinate);}";
+  if (count == 1 && inj) {
     const char *s = str[0];
-    if (s && strstr(s, "gl_FragColor") && strstr(s, "texture2D")) {
+    if (s && strstr(s, "gl_FragColor") && strstr(s, "_tex_diffuse") &&
+        strstr(s, "_vary_texture_coordinate")) {
       static char nb[16384];
       size_t L = (len && len[0] > 0) ? (size_t)len[0] : strlen(s);
-      if (L < sizeof(nb) - 64) {
+      if (L < sizeof(nb) - 80) {
         memcpy(nb, s, L); nb[L] = 0;
-        /* injeta override no fim do main: acha último '}' e insere antes */
         char *last = strrchr(nb, '}');
         if (last) {
-          char tail[64]; snprintf(tail, sizeof(tail), "gl_FragColor=vec4(1.0,0.0,0.0,1.0);}");
-          strcpy(last, tail);
+          strcpy(last, inj);
           const char *p = nb; int nl = (int)strlen(nb);
           if (real) real(sh, 1, &p, &nl);
           return;
@@ -739,6 +825,13 @@ DynLibFunction dysmantle_overrides[] = {
   {"glCompressedTexImage2D", (uintptr_t)my_glCompressedTexImage2D},
   {"glTexParameteri", (uintptr_t)my_glTexParameteri},
   {"glClearColor", (uintptr_t)my_glClearColor},
+  {"glGetUniformLocation", (uintptr_t)my_glGetUniformLocation},
+  {"glUniform1i", (uintptr_t)my_glUniform1i},
+  {"glBindAttribLocation", (uintptr_t)my_glBindAttribLocation},
+  {"glBindTexture", (uintptr_t)my_glBindTexture},
+  {"glActiveTexture", (uintptr_t)my_glActiveTexture},
+  {"glGetAttribLocation", (uintptr_t)my_glGetAttribLocation},
+  {"glVertexAttribPointer", (uintptr_t)my_glVertexAttribPointer},
   {"glDrawArrays", (uintptr_t)my_glDrawArrays},
   {"glDrawElements", (uintptr_t)my_glDrawElements},
   {"glBindFramebuffer", (uintptr_t)my_glBindFramebuffer},

@@ -326,10 +326,20 @@ static void install_brk_traps(void) {
  * vertex format"). A função é chamada por ponteiro (0 BL diretos) → hook_arm64
  * inline pega tudo. Trampolim = 1ª instrução (PIC: sub sp,sp,#0x80) + B addr+4. */
 static uint64_t (*real_createvb)(uint32_t, const void *, uint32_t, int);
-static uint32_t g_vb_fmt0 = 7; /* formato p/ remapear o format-0 (2D sprite) */
+static uint32_t g_vb_fmt0 = 0; /* 0=sem remap; genv fix trata format-0 corretamente */
 static int g_vb_log = 0;
 static int g_vb_dump = 0;
 static uint64_t my_createvb(uint32_t fmt, const void *v, uint32_t cnt, int fl) {
+  if (fmt == 0 && getenv("DYSMANTLE_VB_CALLER")) {
+    static int cn = 0;
+    if (cn < 8) {
+      uintptr_t lb = so_find_addr("android_main") - 0x4651a4;
+      uintptr_t ra = (uintptr_t)__builtin_return_address(0);
+      fprintf(stderr, "[VBCALLER] fmt0 caller=game@0x%lx (cnt=%u)\n",
+              (unsigned long)(ra - lb), cnt);
+      cn++;
+    }
+  }
   if (g_vb_dump && fmt == 0 && v && cnt >= 4) {
     static int dn = 0;
     if (dn < 6) {
@@ -360,6 +370,42 @@ static uint64_t my_createvb(uint32_t fmt, const void *v, uint32_t cnt, int fl) {
     }
   }
   return r;
+}
+/* detour GenerateVerticesByFormat: loga estado da ModelSurface (count + 5
+ * stream ptrs em this+64..96) p/ saber se streams existem mas format=0 */
+static void (*real_genverts)(void *, uint32_t);
+static void my_genverts(void *self, uint32_t fmt) {
+  uint8_t *s = (uint8_t *)self;
+  uint64_t *p64 = (uint64_t *)(s + 64);
+  /* 🌍 FIX MUNDO BRANCO: surfaces do chão chegam com fmt=0 mas TÊM streams
+   * (pos/cor/uv/normal). Computa o formato real dos 5 ponteiros (mesma lógica
+   * de GetVertexComponentFlagsAkaVertexFormat): bit0=pos bit3=cor bit1=uv
+   * bit2=normal bit4=tangent. Sem isso createvb(0) falha → chão não desenha. */
+  if (fmt == 0 && !getenv("DYSMANTLE_GENV_NOFIX")) {
+    uint32_t f = 0;
+    if (p64[0]) f |= 0x1;  /* position */
+    if (p64[1]) f |= 0x8;  /* color */
+    if (p64[2]) f |= 0x2;  /* texcoord */
+    if (p64[3]) f |= 0x4;  /* normal */
+    if (p64[4]) f |= 0x10; /* tangent */
+    static int z = 0;
+    if (z < 4) { fprintf(stderr, "[GENV-FIX] fmt 0 -> 0x%x (streams)\n", f); z++; }
+    if (f) fmt = f;
+  }
+  real_genverts(self, fmt);
+}
+static void hook_genverts(void) {
+  uintptr_t lb = so_find_addr("android_main") - 0x4651a4;
+  uintptr_t addr = lb + 0xa025b8;
+  uint32_t *tr = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  tr[0] = *(uint32_t *)addr; tr[1] = 0x58000051u; tr[2] = 0xd61f0220u;
+  *(uint64_t *)&tr[3] = addr + 4;
+  __builtin___clear_cache((char *)tr, (char *)tr + 32);
+  real_genverts = (void (*)(void *, uint32_t))tr;
+  so_make_text_writable(); hook_arm64(addr, (uintptr_t)my_genverts);
+  so_make_text_executable(); so_flush_caches();
+  fprintf(stderr, "hook_genverts: detour @ %p\n", (void *)addr);
 }
 static void hook_createvb(void) {
   uintptr_t lb = so_find_addr("android_main") - 0x4651a4;
@@ -551,6 +597,7 @@ int main(int argc, char *argv[]) {
   { const char *f = getenv("DYSMANTLE_VB_FMT0"); if (f) g_vb_fmt0 = atoi(f); }
   g_vb_log = getenv("DYSMANTLE_VB_LOG") ? 1 : 0;
   g_vb_dump = getenv("DYSMANTLE_VB_DUMP") ? 1 : 0;
+  hook_genverts(); /* fix do mundo branco: fmt 0 → formato real dos streams */
   hook_createvb();
   if (getenv("DYSMANTLE_PB_TRAPS")) install_brk_traps();
 

@@ -112,3 +112,38 @@ Dados: `~/dysmantle-build/stage/` → rsync p/ device (libNativeGame.so + libc++
 `gamedata/` precisa existir (mkdir) p/ o log. Rodar: `bash diag5.sh` (detached) → run.log + gamedata/DYSMANTLE.log.
 BRK-trap tracer (install_brk_traps, comentado) p/ rastrear funções locais. Crash handler faz stack-scan
 (g_load_base, range 0x463000-0xd8e000). DYSMANTLE_ASSETS=assets, SDL_VIDEODRIVER=mali.
+
+## 🖼️ MURO ATUAL (2026-06-10): MUNDO NÃO RENDERIZA (chão branco, objetos faltando)
+
+**SINTOMAS (Felipe):** chega no gameplay 100%, controle perfeito, mas: chão BRANCO;
+árvores/barris/matos/cabeça/armas do player NÃO aparecem; corpo+calça do player E tampa do
+bonker renderizam (com cor). "algo surreal".
+
+**PIPELINE MAPEADO (hooks GL, todos env-gated em imports.c/main.c):**
+- Cena renderiza num FBO (color tex19 + depth tex20, COMPLETO) → composto fullscreen com o
+  shader diffuse (gl_FragColor = _vary_color * texture2D(_tex_diffuse, uv)).
+- DYSMANTLE_CLEAR_TEST=2 (só tela)→0% aparece (FBO cobre tudo); =3 (só FBO)→60% da tela vira a
+  cor de clear do FBO = 60% do FBO nunca é desenhado (chão/objetos faltam no FBO).
+- CAUSA=format-0: o mundo usa ModelSurface::GenerateVerticesByFormat(this,fmt)@0xa025b8 →
+  NX_Graphics_CreateVertexBufferWithVertices(fmt,NULL,count,4)@0x4837d4; fmt=0 →
+  Legacy::ConvertVertexFormatToVertexElements(0)@0x574034 retorna 0 elementos → "unknown vertex
+  format" → buffer NULL → não desenha. Eram 41633 falhas/run.
+- FIX PARCIAL (ON por default): hook_genverts — quando fmt==0, computa o formato real dos 5
+  stream ptrs (this+64=pos→0x1 +72=cor→0x8 +80=uv→0x2 +88=normal→0x4 +96=tangent→0x10, igual
+  GetVertexComponentFlagsAkaVertexFormat@0xa05108). Reduziu 41633→2587 erros. MAS visualmente
+  NÃO mudou (cobertura FBO segue 60% clear). Faltam os 2587 (streams nulos? outro caller?).
+
+**DESCARTADO:** shaders compilam/linkam 100%; texturas RGBA8 uncompressed, upload OK, DADOS
+REAIS; sem texture arrays; engine já usa LINEAR+CLAMP (NPOT-safe); atributos corretos (pos@0
+cor@12 uv@16 stride24, glBindAttribLocation pos→0 cor→1 uv→2); texturas reais bound no draw.
+GLVER=3.0 remove erros de vertex mas chão segue branco. ⚠️SHADER_TEX deu tela branca = ENGANOSO
+(mostra o FBO vazio, não texturas brancas).
+
+**ENVS DIAG:** VB_LOG/VB_FMT0/VB_DUMP/VB_CALLER, GENV_NOFIX, SHADER_DUMP/RED/TEX, TEX_LOG/
+TEXPARAM_LOG/NPOT_OFF, CLEAR_TEST=1/2/3, DRAW_LOG, ATTR_LOG, UNIF_LOG, GLVER, PB_SELFTEST
+(navega ao gameplay: 1× baixo + A/X). Tooling: capgame.sh <fmt0> (navega+dd /dev/fb0); converto
+fb→PNG no PC (BGRA 1280x720 8MB) e leio a imagem p/ julgar sozinho.
+
+**PRÓXIMO:** achar os 2587 format-0 restantes (raise VB_CALLER cap; streams nulos vs outro
+caller); OU por que surfaces 0xF consertadas não desenham no FBO. Lição Bully: pode ser algo
+que NÓS mudamos.
