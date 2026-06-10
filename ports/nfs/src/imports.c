@@ -302,9 +302,17 @@ void nfs_install_dyncast_hook(void) {
           (void *)even, (void *)g_dyncast_tramp);
 }
 
+/* última cadeia de dcast vista — o crash_handler imprime p/ identificar o objeto
+ * selvagem (cujo handler interno deu blx em lixo). */
+const void *g_last_dcast_sub, *g_last_dcast_vt, *g_last_dcast_ti, *g_last_dcast_caller;
 static void *my_dynamic_cast(const void *sub, const void *src, const void *dst, long s2d) {
   int dbg = getenv("NFS_DCASTLOG") != NULL;
   static int dn = 0;
+  g_last_dcast_sub = sub;
+  g_last_dcast_caller = __builtin_return_address(0);
+  g_last_dcast_vt = mem_readable(sub, 4) ? *(const void *const *)sub : 0;
+  g_last_dcast_ti = (g_last_dcast_vt && mem_readable((const char *)g_last_dcast_vt - 4, 4))
+                        ? *(const void *const *)((const char *)g_last_dcast_vt - 4) : 0;
   if (!mem_readable(sub, 4)) goto fail;
   { const char *vt = *(const char *const *)sub;
     if (!mem_readable(vt - 8, 8)) goto fail;

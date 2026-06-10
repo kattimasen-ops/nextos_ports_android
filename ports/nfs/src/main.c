@@ -146,6 +146,20 @@ static void crash_handler(int sig, siginfo_t *info, void *uctx) {
     const uint32_t *w = (const uint32_t *)((pc & ~3u) - 16);
     for (int q = 0; q < 8; q++) fprintf(stderr, "    %p: %08x\n", (void *)(w + q), w[q]);
   }
+  /* objeto do último dynamic_cast (provável fonte da vtable selvagem) */
+  { extern const void *g_last_dcast_sub, *g_last_dcast_vt, *g_last_dcast_ti, *g_last_dcast_caller;
+    fprintf(stderr, "  --- last dynamic_cast: sub=%p vt=%p ti=%p caller=%p ---\n",
+            g_last_dcast_sub, g_last_dcast_vt, g_last_dcast_ti, g_last_dcast_caller);
+    if ((uintptr_t)g_last_dcast_sub > 0x1000) {
+      const uint32_t *o = (const uint32_t *)g_last_dcast_sub;
+      fprintf(stderr, "    obj[0..7]:");
+      for (int q = 0; q < 8; q++) fprintf(stderr, " %08x", o[q]);
+      fprintf(stderr, "\n    obj as ascii: ");
+      const unsigned char *b = (const unsigned char *)g_last_dcast_sub;
+      for (int q = 0; q < 32; q++) fprintf(stderr, "%c", (b[q] >= 32 && b[q] < 127) ? b[q] : '.');
+      fprintf(stderr, "\n");
+    }
+  }
 
   /* backtrace: varre a pilha e resolve cada retorno contra TODAS as regiões
    * executáveis (mapeia anon→módulo via faixas conhecidas no maps). */

@@ -64,7 +64,24 @@ my_sigaction + my_sigprocmask** traduzem o struct/sigset bionic↔glibc (dropam 
 SA_THIRTYTWO; glibc põe o restorer certo). NFS_NOSIGSHIM=1 desliga. → ctors completam, sem SKIPCTOR.
 **OBS: isso NÃO consertou a corrupção de asset** (mesma cadeia RTTI; lixo mudou HT=1→TDBG).
 
-### 🔑 MURO ATUAL = ponteiro de vtable SELVAGEM no parse (heap-layout-dependent)
+### 🎯🔑 DESCOBERTA — o muro é o GERADOR DE SHADERS, não o parse do OBB!
+O `dynamic_cast` que crasha (em `0x46b6fc`, dentro de `0x46b220`) é:
+**`dynamic_cast<im::isis::shadergen::UniformNode*>( (im::isis::shadergen::Node*)sub )`**
+(type_infos resolvidos: src=`N2im4isis9shadergen4NodeE`, dst=`N2im4isis9shadergen11UniformNodeE`).
+- `sub` = `[fp-32]`. O loop em `0x46afe0` itera um array de **nós de grafo de shader** (`[sl+24]`,
+  índice `[r0+r8<<2]`) e faz dcast de cada Node→UniformNode. UM nó está SELVAGEM (vtable lixo).
+- `0x47a920` (que aparecia como "typeinfo lixo") é na verdade a **vtable legítima de um type_info**
+  da libapp (o type_info @0xab36a4 tem [0]=0x47a920) — confirma que o nó selvagem tinha
+  `vtable[-1]` apontando p/ uma vtable de type_info em vez de um OBJETO type_info.
+- **Implicação**: a engine gera shaders no load (provável p/ GLES2/Mali). O grafo de shader tem um nó
+  inválido — misparse dos dados de shader OU um tipo de nó cujo construtor/factory não rodou (vtable
+  não setada) OU RTTI cross-módulo quebrado no factory de nós.
+- **Próximo passo**: achar onde o array de nós (`this->[24]`) é construído (função que contém o loop
+  ~0x46ad3c, e callers 0x3de064/0x46b958). Logar cada nó + sua vtable; o 1º nó com vtable fora das
+  faixas de módulo é o culpado. Ver se um tipo de Node (ex: UniformNode e irmãos) tem ctor que não
+  roda. Tipos: desmangle `N2im4isis9shadergenXX...E` p/ mapear a hierarquia de Node.
+
+### (antigo) caracterização genérica do ponteiro selvagem (ainda válida)
 - O objeto passado ao dynamic_cast tem vtable apontando p/ lixo. Os valores ("HT=1", "TDBG") são
   **ASCII e MUDAM** conforme PAD/ctors (não são tags fixas; NÃO existem em libapp nem no OBB) →
   o ponteiro do OBJETO/vtable é SELVAGEM, aponta p/ memória arbitrária com dados de asset.
