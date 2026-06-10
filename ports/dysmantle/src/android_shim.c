@@ -372,10 +372,13 @@ static void process_sdl_events(void) {
       struct { int f, act, kc; } seq[] = {
         {360, 0, AKEYCODE_BUTTON_A},   {370, 1, AKEYCODE_BUTTON_A},   /* title->menu */
         {480, 0, AKEYCODE_DPAD_DOWN},  {490, 1, AKEYCODE_DPAD_DOWN},  /* 1x baixo */
-        {560, 0, AKEYCODE_BUTTON_A},   {570, 1, AKEYCODE_BUTTON_A},   /* A entra */
-        {620, 0, AKEYCODE_BUTTON_X},   {630, 1, AKEYCODE_BUTTON_X},   /* X (alt) */
-        {760, 0, AKEYCODE_BUTTON_A},   {770, 1, AKEYCODE_BUTTON_A},   /* confirma */
-        {900, 0, AKEYCODE_BUTTON_A},   {910, 1, AKEYCODE_BUTTON_A},
+        {560, 0, AKEYCODE_BUTTON_X},   {570, 1, AKEYCODE_BUTTON_X},   /* X entra (sequência do usuário) */
+        {660, 0, AKEYCODE_BUTTON_B},   {670, 1, AKEYCODE_BUTTON_B},   /* B dispensa promo DLC */
+        {760, 0, AKEYCODE_DPAD_DOWN},  {770, 1, AKEYCODE_DPAD_DOWN},  /* retry: baixo */
+        {820, 0, AKEYCODE_BUTTON_X},   {830, 1, AKEYCODE_BUTTON_X},   /* retry: X entra */
+        {920, 0, AKEYCODE_BUTTON_B},   {930, 1, AKEYCODE_BUTTON_B},   /* B dispensa popup */
+        {1000, 0, AKEYCODE_BUTTON_A},  {1010, 1, AKEYCODE_BUTTON_A},  /* A confirma */
+        {1100, 0, AKEYCODE_BUTTON_X},  {1110, 1, AKEYCODE_BUTTON_X},  /* X */
       };
       for (unsigned i = 0; i < sizeof(seq)/sizeof(seq[0]); i++)
         if (poll_n == seq[i].f) {

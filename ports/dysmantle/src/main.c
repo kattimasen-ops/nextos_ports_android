@@ -11,6 +11,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,9 +76,24 @@ static void resolve_addr2(uintptr_t a, char *out, int outsz) {
   }
   resolve_addr(a, out, outsz);
 }
+/* 🩹 Recuperação do crash do skinned-actor: ModelInstance::InitializeFromModel
+ * crasha (race de init de singleton → cópia/deref de ponteiro nulo) ao importar
+ * o mapa. O detour my_ifm (abaixo) faz sigsetjmp; se a função crashar, o
+ * crash_handler dá siglongjmp de volta → InitializeFromModel é PULADO inteiro
+ * (o ator skinned não renderiza, mas o mundo carrega). Per-thread. */
+static __thread sigjmp_buf g_ifm_jmp;
+static __thread volatile int g_ifm_armed;
+static volatile int g_ifm_skips;
 static void crash_handler(int sig, siginfo_t *info, void *uc) {
   uintptr_t fault = (uintptr_t)info->si_addr;
   uintptr_t tb = (uintptr_t)text_base;
+  if (sig == SIGSEGV && g_ifm_armed && !getenv("DYSMANTLE_NORECOVER")) {
+    g_ifm_armed = 0;
+    if (__sync_fetch_and_add(&g_ifm_skips, 1) < 6)
+      fprintf(stderr, "[IFM-SKIP] InitializeFromModel (skinned) crashou @%p -> pulado\n",
+              info->si_addr);
+    siglongjmp(g_ifm_jmp, 1); /* volta pro my_ifm, pula o resto da função */
+  }
   fprintf(stderr, "\n=== CRASH sig=%d addr=%p tid=%d ===\n", sig, info->si_addr,
           (int)syscall(178));
   { /* comm da thread que crashou */
@@ -516,6 +532,36 @@ static void hook_initbufs(void) {
   so_make_text_executable(); so_flush_caches();
   fprintf(stderr, "hook_initbufs: detour @ %p\n", (void *)addr);
 }
+/* detour de StageImporter::AddActorFromNode(DMNode*, const nTransform&) — o TOPO
+ * da criação de um ator. Arma sigsetjmp; se QUALQUER coisa na criação do ator
+ * crashar (incl. o skinned InitializeFromModel), o handler dá longjmp de volta
+ * aqui → o ATOR INTEIRO é pulado (não meio-criado), o mundo carrega sem crash. */
+static void *(*real_aafn)(void *, void *, void *);
+static void *my_aafn(void *self, void *node, void *xform) {
+  if (g_ifm_armed) return real_aafn(self, node, xform); /* reentrante */
+  void *r = NULL;
+  if (sigsetjmp(g_ifm_jmp, 1) == 0) {
+    g_ifm_armed = 1;
+    r = real_aafn(self, node, xform);
+    g_ifm_armed = 0;
+  } else {
+    g_ifm_armed = 0; r = NULL; /* ator pulado */
+  }
+  return r;
+}
+static void hook_ifm(void) {
+  uintptr_t lb = so_find_addr("android_main") - 0x4651a4;
+  uintptr_t addr = lb + 0xd30b78; /* StageImporter::AddActorFromNode */
+  uint32_t *tr = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  tr[0] = *(uint32_t *)addr; tr[1] = 0x58000051u; tr[2] = 0xd61f0220u;
+  *(uint64_t *)&tr[3] = addr + 4;
+  __builtin___clear_cache((char *)tr, (char *)tr + 32);
+  real_aafn = (void *(*)(void *, void *, void *))tr;
+  so_make_text_writable(); hook_arm64(addr, (uintptr_t)my_aafn);
+  so_make_text_executable(); so_flush_caches();
+  fprintf(stderr, "hook_ifm: detour AddActorFromNode @ %p\n", (void *)addr);
+}
 static void hook_genverts(void) {
   uintptr_t lb = so_find_addr("android_main") - 0x4651a4;
   uintptr_t addr = lb + 0xa025b8;
@@ -725,6 +771,11 @@ int main(int argc, char *argv[]) {
   hook_genverts(); /* fix do mundo branco: fmt 0 → formato real dos streams */
   hook_initbufs();
   hook_createvb();
+  /* skip do skinned-actor: NÃO é a solução real (o crash vem de config LOW;
+   * reverter as configs pro default resolve). Fica como rede de segurança
+   * opcional via DYSMANTLE_SKIP_BADACTORS=1 (corrompe o importer, usar só p/
+   * emergência). Default OFF p/ comportamento normal. */
+  if (getenv("DYSMANTLE_SKIP_BADACTORS")) hook_ifm();
   if (getenv("DYSMANTLE_PB_TRAPS")) install_brk_traps();
 
   /* registra o .eh_frame do jogo no unwinder C++: o módulo é custom-loaded (não

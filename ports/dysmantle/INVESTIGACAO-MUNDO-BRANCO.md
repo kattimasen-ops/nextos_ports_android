@@ -247,3 +247,18 @@ ou RE do construtor da ModelSurface p/ achar onde o formato deveria ser setado (
 - Infra anti-crash adicionada (env-default, inofensiva): guards de memcpy/memmove/__memcpy_chk/
   __memmove_chk que pulam cópia com dst/src nulo (não pegou esse crash pq é interno ao libc, mas
   protege contra null genuíno). TEX_HALF disponível p/ reduzir pressão de textura se reincidir.
+
+## 🎯 RESOLVIDO (causa do crash no loading): DYNAMIC SHADOWS (descoberto pelo usuário)
+- **Ativar "Dynamic Shadows" nas opções → trava/crasha no loading do mundo.** Com OFF, carrega
+  normal (funcionou o dia todo).
+- Causa técnica: sombras dinâmicas renderizam os atores SKINNED num shadow map (FBO de
+  profundidade). No Mali-450 Utgard (GLES2) esse caminho de render skinned-p/-shadow quebra →
+  crash em StageImporter::AddActorFromNode → ActorRendererModelSkinned::OnAllocateActor →
+  ModelInstance::InitializeFromModel (ponteiro nulo/lixo).
+- O setting PERSISTE (por isso relançar continuava crashando após ativar). NÃO era race/device/
+  overcommit/GPU-state/meu hook — foi o setting "dynamic shadows".
+- **FIX p/ usuário: manter Dynamic Shadows OFF.** (Opcional: travar o setting no port p/ não dar
+  pra ativar — DYSMANTLE_SKIP_BADACTORS=1 existe como rede de segurança mas corrompe o importer,
+  evitar.)
+- Reverte a teoria de "mundo branco" tb? NÃO — mundo branco (geometria format-0) é outro assunto
+  (terreno não desenha). Este achado é só sobre o CRASH no loading quando shadows ON.
