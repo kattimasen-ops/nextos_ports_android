@@ -361,6 +361,20 @@ static uint64_t my_createvb(uint32_t fmt, const void *v, uint32_t cnt, int fl) {
     }
   }
   uint32_t use = (fmt == 0) ? g_vb_fmt0 : fmt;
+  /* informa o stride real (do formato) ao imports.c p/ o auto-fix de stride no
+   * glVertexAttribPointer. Mapa formato→stride da ConvertVertexFormatToVertexElements. */
+  { extern void dysmantle_record_vbsize(long, int);
+    int st = 0;
+    switch (use) {
+      case 0x1: case 0x61: st = 12; break;
+      case 0x7: st = 24; break;
+      case 0xf: case 0x6f: st = 28; break;
+      case 0x1f: case 0x67: st = 32; break;
+      case 0x7f: st = 40; break;
+      default: st = 0;
+    }
+    if (st) dysmantle_record_vbsize((long)st * cnt, st);
+  }
   uint64_t r = real_createvb(use, v, cnt, fl);
   if (g_vb_log) {
     static uint64_t seen = 0;
@@ -384,6 +398,10 @@ static void my_genverts(void *self, uint32_t fmt) {
    * de GetVertexComponentFlagsAkaVertexFormat): bit0=pos bit3=cor bit1=uv
    * bit2=normal bit4=tangent. Sem isso createvb(0) falha → chão não desenha. */
   if (fmt == 0 && !getenv("DYSMANTLE_GENV_NOFIX")) {
+    /* DYSMANTLE_GENV_FMT força um formato fixo (ex 7 = pos+cor+uv, 24B = o que
+     * os atributos do render esperam). Sem env, computa dos streams. */
+    const char *fe = getenv("DYSMANTLE_GENV_FMT");
+    if (fe) { uint32_t ff = (uint32_t)atoi(fe); if (ff) { real_genverts(self, ff); return; } }
     uint32_t f = 0;
     if (p64[0]) f |= 0x1;  /* position */
     if (p64[1]) f |= 0x8;  /* color */

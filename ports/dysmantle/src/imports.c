@@ -328,6 +328,7 @@ static const unsigned char *my_glGetString(unsigned name) {
 
 /* Roteador p/ funções GL que precisamos controlar (anti stack-smash). */
 static void rgl(const char *n, void **slot);
+static void store_shader_src(unsigned sh, const char *s, int len);
 static void my_glShaderSource(unsigned, int, const char *const *, const int *);
 static void my_glCompileShader(unsigned);
 static void my_glLinkProgram(unsigned);
@@ -382,6 +383,38 @@ static void my_glTexStorage2D(unsigned tgt, int lvls, unsigned ifmt, int w,
 /* glTexImage2D: loga ifmt/fmt/type/dim + erro GL. ifmt GLES3 (ex: GL_RGBA8
  * 0x8058, GL_SRGB8 0x8C41, sized) NÃO existe no GLES2 → INVALID_ENUM →
  * textura branca. GLES2 quer ifmt = base (GL_RGBA 0x1908) sem sized. */
+/* ===== AUTO-FIX do mismatch stride buffer(0x7F=40) × atributos(0x7=24) =====
+ * O render às vezes liga um buffer de formato MAIOR (variante 0x7F/40B, pq a
+ * variante pedida falhou de criar) mas configura atributos com stride do
+ * formato pedido (0x7/24B). A GPU lê vértices errados → branco. Rastreamos o
+ * stride REAL de cada GL buffer (via formato do createvb) e, no
+ * glVertexAttribPointer, se o buffer ligado tem stride maior, usamos o dele
+ * (os offsets pos@0/cor@12/uv@16 valem nos dois formatos). */
+static unsigned g_cur_array_buf = 0;
+static int g_buf_stride[4096];        /* id -> stride real do buffer */
+/* tabela (tamanho do buffer de vértice -> stride), preenchida pelo createvb
+ * (sabe formato→stride e count). O upload glBufferData casa por tamanho. */
+static struct { long size; int stride; } g_szstride[512];
+static int g_szs_n = 0;
+void dysmantle_record_vbsize(long size, int stride) {
+  if (size <= 0 || stride <= 0) return;
+  g_szstride[g_szs_n % 512].size = size;
+  g_szstride[g_szs_n % 512].stride = stride;
+  g_szs_n++;
+}
+static int lookup_stride_by_size(long size) {
+  int lim = g_szs_n < 512 ? g_szs_n : 512;
+  for (int i = 0; i < lim; i++)
+    if (g_szstride[i].size == size) return g_szstride[i].stride;
+  return 0;
+}
+static int g_stridefix = -1;
+static void my_glBindBuffer(unsigned tgt, unsigned id) {
+  static void (*real)(unsigned, unsigned) = NULL; rgl("glBindBuffer", (void **)&real);
+  if (tgt == 0x8892) g_cur_array_buf = id; /* GL_ARRAY_BUFFER */
+  if (real) real(tgt, id);
+}
+
 /* trace de binding de textura no momento do draw */
 static unsigned g_active_unit = 0, g_bound_tex[8] = {0};
 static void my_glActiveTexture(unsigned tex) {
@@ -413,6 +446,12 @@ static int my_glGetUniformLocation(unsigned prog, const char *nm) {
   }
   return r;
 }
+static unsigned g_cur_prog = 0;
+static void my_glUseProgram(unsigned p) {
+  static void (*real)(unsigned) = NULL; rgl("glUseProgram", (void **)&real);
+  g_cur_prog = p;
+  if (real) real(p);
+}
 static void my_glBindAttribLocation(unsigned prog, unsigned idx, const char *nm) {
   static void (*real)(unsigned, unsigned, const char *) = NULL;
   rgl("glBindAttribLocation", (void **)&real);
@@ -433,6 +472,19 @@ static void my_glVertexAttribPointer(unsigned idx, int sz, unsigned typ,
     fprintf(stderr, "[ATTR] idx=%u size=%d type=0x%x norm=%d stride=%d off=%ld\n",
             idx, sz, typ, norm, stride, (long)(uintptr_t)ptr); n++;
   }
+  /* AUTO-FIX: se o buffer ligado tem stride REAL maior que o stride do
+   * atributo (mismatch variante 0x7F×0x7), usa o do buffer. Offsets pos@0/
+   * cor@12/uv@16 são iguais nos dois → ler com stride do buffer = correto. */
+  if (g_stridefix < 0) g_stridefix = getenv("DYSMANTLE_STRIDEFIX_OFF") ? 0 : 1;
+  if (g_stridefix && stride > 0 && g_cur_array_buf < 4096) {
+    int bs = g_buf_stride[g_cur_array_buf];
+    if (bs > stride && (long)(uintptr_t)ptr + sz * 4 <= bs) {
+      static int fl = 0;
+      if (fl < 8) { fprintf(stderr, "[STRIDEFIX] buf=%u attr_stride=%d -> %d (idx=%u off=%ld)\n",
+                            g_cur_array_buf, stride, bs, idx, (long)(uintptr_t)ptr); fl++; }
+      stride = bs;
+    }
+  }
   if (real) real(idx, sz, typ, norm, stride, ptr);
 }
 static int my_glGetAttribLocation(unsigned prog, const char *name) {
@@ -452,6 +504,26 @@ static unsigned long g_draws_fbo = 0, g_draws_screen = 0;
 static void my_glBindFramebuffer(unsigned tgt, unsigned fb) {
   static void (*real)(unsigned, unsigned) = NULL;
   rgl("glBindFramebuffer", (void **)&real);
+  /* DIAG: ao SAIR do FBO da cena (fbo!=0 -> 0), lê o conteúdo do FBO p/ ver a
+   * cena SEM o composite. Dump 1x após gameplay (g_draws_fbo já alto). */
+  if (getenv("DYSMANTLE_FBO_DUMP") && g_cur_fbo != 0 && fb == 0 &&
+      g_draws_fbo > 2000) {
+    static int done = 0;
+    if (!done) {
+      done = 1;
+      static void (*rp)(int,int,int,int,unsigned,unsigned,void*) = NULL;
+      rgl("glReadPixels", (void **)&rp);
+      int W = 1280, H = 720;
+      unsigned char *buf = malloc((size_t)W * H * 4);
+      if (rp && buf) {
+        rp(0, 0, W, H, 0x1908, 0x1401, buf); /* RGBA, UBYTE */
+        FILE *f = fopen("fbo_scene.raw", "wb");
+        if (f) { fwrite(buf, 1, (size_t)W * H * 4, f); fclose(f); }
+        fprintf(stderr, "[FBO_DUMP] cena do FBO salva (fbo_scene.raw) draws_fbo=%lu\n", g_draws_fbo);
+      }
+      free(buf);
+    }
+  }
   g_cur_fbo = fb;
   if (real) real(tgt, fb);
 }
@@ -465,9 +537,10 @@ static void my_glDrawElements(unsigned mode, int cnt, unsigned typ, const void *
             g_draws_fbo, g_draws_screen, g_cur_fbo);
   if (getenv("DYSMANTLE_DRAW_LOG")) {
     static int dn = 0;
-    if (g_draws_fbo > 100 && dn < 25) { /* draws de gameplay (dentro do FBO) */
-      fprintf(stderr, "[DRAW] cnt=%d unit=%u tex[0]=%u tex[1]=%u fbo=%u\n",
-              cnt, g_active_unit, g_bound_tex[0], g_bound_tex[1], g_cur_fbo);
+    /* draws GRANDES (chão/terreno) dentro do FBO: loga programa + texturas */
+    if (g_cur_fbo && cnt > 3000 && dn < 30) {
+      fprintf(stderr, "[BIGDRAW] prog=%u cnt=%d unit=%u tex[0]=%u tex[1]=%u\n",
+              g_cur_prog, cnt, g_active_unit, g_bound_tex[0], g_bound_tex[1]);
       dn++;
     }
   }
@@ -520,10 +593,52 @@ static void my_glBufferData(unsigned tgt, long size, const void *data, unsigned 
   if (gerr) while (gerr()) {}
   if (real) real(tgt, size, data, usage);
   unsigned e = gerr ? gerr() : 0;
+  /* DETECTA o stride real do buffer de vértice pela estrutura: o stride certo
+   * deixa as UVs (offset 16, 2 floats) consistentemente em ~[0,1] p/ vários
+   * vértices. Escolhe o MENOR stride com >85% de UVs válidas. */
+  /* MIRA o chão (variante 0x7F/40B desenhada com atributos 0x7/24B): só corrige
+   * se stride 40 dá UVs válidas E stride 24 NÃO (confirma que é 40, não 24).
+   * Não toca skinned (offsets diferentes). */
+  if (tgt == 0x8892 && data && size >= 40 * 16 && g_cur_array_buf < 4096) {
+    const unsigned char *b = (const unsigned char *)data;
+    int n40 = (int)(size / 40); if (n40 > 24) n40 = 24;
+    int n24 = (int)(size / 24); if (n24 > 24) n24 = 24;
+    int ok40 = 0, ok24 = 0;
+    for (int v = 0; v < n40; v++) {
+      const float *uv = (const float *)(b + (size_t)v * 40 + 16);
+      const float *p = (const float *)(b + (size_t)v * 40);
+      if (uv[0]==uv[0] && uv[1]==uv[1] && uv[0]>-0.05f && uv[0]<1.5f &&
+          uv[1]>-0.05f && uv[1]<1.5f && p[0]==p[0] && p[1]==p[1]) ok40++;
+    }
+    for (int v = 0; v < n24; v++) {
+      const float *uv = (const float *)(b + (size_t)v * 24 + 16);
+      if (uv[0]==uv[0] && uv[1]==uv[1] && uv[0]>-0.05f && uv[0]<1.5f &&
+          uv[1]>-0.05f && uv[1]<1.5f) ok24++;
+    }
+    if (ok40 * 100 >= n40 * 90 && ok24 * 100 < n24 * 70)
+      g_buf_stride[g_cur_array_buf] = 40;
+  }
   static int n = 0;
   if (getenv("DYSMANTLE_BUF_LOG") && (n < 60 || e)) {
     fprintf(stderr, "[BUFDATA] tid=%d tgt=0x%x size=%ld data=%s usage=0x%x -> err=0x%x\n",
             (int)syscall(178), tgt, size, data ? "ptr" : "NULL", usage, e); n++;
+  }
+  /* dump dos vértices do buffer GIGANTE (chão): pos vec3@0 + cor rgba8@12 +
+   * uv vec2@16, stride 24. Vê se UVs/cor estão válidas. */
+  if (getenv("DYSMANTLE_VERT_DUMP") && data && size > 200000 && tgt == 0x8892) {
+    static int vd = 0;
+    if (vd < 2) {
+      const unsigned char *b = (const unsigned char *)data;
+      fprintf(stderr, "[VERTDUMP] buffer size=%ld (~%ld verts stride24)\n", size, size/24);
+      for (int v = 0; v < 6; v++) {
+        const float *pos = (const float *)(b + v*24);
+        const unsigned char *col = b + v*24 + 12;
+        const float *uv = (const float *)(b + v*24 + 16);
+        fprintf(stderr, "  v%d: pos(%.1f,%.1f,%.1f) col(%d,%d,%d,%d) uv(%.3f,%.3f)\n",
+                v, pos[0],pos[1],pos[2], col[0],col[1],col[2],col[3], uv[0],uv[1]);
+      }
+      vd++;
+    }
   }
 }
 
@@ -740,8 +855,25 @@ static void my_glShaderSource(unsigned sh, int count, const char *const *str,
       fprintf(stderr, "%.*s", len && len[i] > 0 ? len[i] : 2000, str[i]);
     fprintf(stderr, "\n[/SHADER src #%u]\n", sh);
   }
+  store_shader_src(sh, str[0], len ? len[0] : -1);
   /* DIAG: reescreve o fim do fragment shader. RED=vermelho sólido (localiza
    * geometria). TEX=só a textura (sem _vary_color, p/ ver se a cor lava). */
+  /* DYSMANTLE_NOCOL: troca "_vary_color * diffuse_sample" por "diffuse_sample"
+   * no shader básico — testa se a cor de vértice (luz assada) lava branco. */
+  if (count == 1 && getenv("DYSMANTLE_NOCOL") && str[0] &&
+      strstr(str[0], "_vary_color * diffuse_sample")) {
+    static char nb[16384];
+    size_t L = (len && len[0] > 0) ? (size_t)len[0] : strlen(str[0]);
+    if (L < sizeof(nb) - 4) {
+      memcpy(nb, str[0], L); nb[L] = 0;
+      char *p = strstr(nb, "_vary_color * diffuse_sample");
+      if (p) {
+        memmove(p, "(vec4(1.0)) * diffuse_sample", 28); /* 28==28, neutraliza cor */
+        const char *pp = nb; int nl = (int)strlen(nb);
+        if (real) { real(sh, 1, &pp, &nl); return; }
+      }
+    }
+  }
   const char *inj = NULL;
   if (getenv("DYSMANTLE_SHADER_RED")) inj = "gl_FragColor=vec4(1.0,0.0,0.0,1.0);}";
   else if (getenv("DYSMANTLE_SHADER_TEX")) inj = "gl_FragColor=texture2D(_tex_diffuse,_vary_texture_coordinate);}";
@@ -781,8 +913,30 @@ static void my_glCompileShader(unsigned sh) {
     }
   }
 }
+/* armazena source de cada shader (p/ dumpar o do program do chão) */
+static struct { unsigned sh; char *src; } g_shsrc[256]; static int g_nsh = 0;
+static void store_shader_src(unsigned sh, const char *s, int len) {
+  if (g_nsh >= 256) return;
+  int L = len > 0 ? len : (int)strlen(s);
+  char *c = malloc(L + 1); if (!c) return;
+  memcpy(c, s, L); c[L] = 0;
+  g_shsrc[g_nsh].sh = sh; g_shsrc[g_nsh].src = c; g_nsh++;
+}
 static void my_glLinkProgram(unsigned pr) {
   static void (*real)(unsigned) = NULL; rgl("glLinkProgram", (void **)&real);
+  /* dump da fragment source do programa alvo (DYSMANTLE_DUMP_PROG=N) */
+  const char *want = getenv("DYSMANTLE_DUMP_PROG");
+  if (want && (unsigned)atoi(want) == pr) {
+    static void (*gas)(unsigned,int,int*,unsigned*) = NULL;
+    rgl("glGetAttachedShaders", (void **)&gas);
+    if (gas) {
+      unsigned shs[8]; int cnt = 0; gas(pr, 8, &cnt, shs);
+      for (int i = 0; i < cnt; i++)
+        for (int j = 0; j < g_nsh; j++)
+          if (g_shsrc[j].sh == shs[i] && strstr(g_shsrc[j].src, "gl_FragColor"))
+            fprintf(stderr, "[PROGSRC prog=%u sh=%u]\n%s\n[/PROGSRC]\n", pr, shs[i], g_shsrc[j].src);
+    }
+  }
   static void (*giv)(unsigned, unsigned, int *) = NULL;
   rgl("glGetProgramiv", (void **)&giv);
   static void (*plog)(unsigned, int, int *, char *) = NULL;
@@ -865,6 +1019,8 @@ DynLibFunction dysmantle_overrides[] = {
   {"glCompressedTexImage2D", (uintptr_t)my_glCompressedTexImage2D},
   {"glTexParameteri", (uintptr_t)my_glTexParameteri},
   {"glClearColor", (uintptr_t)my_glClearColor},
+  {"glBindBuffer", (uintptr_t)my_glBindBuffer},
+  {"glUseProgram", (uintptr_t)my_glUseProgram},
   {"glBufferData", (uintptr_t)my_glBufferData},
   {"glEnable", (uintptr_t)my_glEnable},
   {"glDepthFunc", (uintptr_t)my_glDepthFunc},

@@ -108,3 +108,29 @@ renderizam branco/invisível? Suspeitas: (a) lighting/blend lava branco (testar 
 ainda NÃO testado — clr3 só testou clear); (b) shader/textura específica por tipo de objeto;
 (c) coordenadas/projeção. AllocateVertexStreamsForVertexFormat@0xa04e84 escreve streams
 this+64..96 baseado no formato (bits). AllocateVertexStreams(0)=sem streams.
+
+## 🎯 SESSÃO 2 — CAUSA-RAIZ DO CHÃO BRANCO ENCONTRADA (stride mismatch)
+| Teste | Método | Resultado |
+|---|---|---|
+| Ler FBO direto (sem composite) | FBO_DUMP glReadPixels | cena = chão branco + blobs pretos (NÃO é composite; é a cena mesmo) |
+| Neutralizar _vary_color | NOCOL (shader) | chão centro AINDA branco + bordas PRETAS (fog of war ok); objetos+detalhados |
+| Shader do chão (prog 34) | DUMP_PROG=34 | é o BÁSICO: gl_FragColor=_vary_color*texture2D(_tex_diffuse,uv). tex23=cinza real |
+| **DUMP vértices do chão** | VERT_DUMP buffer>200KB | **🔑 dados em STRIDE 40 (formato 0x7F) mas atributos em STRIDE 24 (0x7)! v0/v3 válidos a 0/120=3×40; v1 uv=(-39,-73)=posição de v0** |
+| Atributos | ATTR_LOG | stride=24 (pos@0 cor@12 uv@16) — mismatch com buffer 40B |
+| Forçar stride 40 GLOBAL | FORCE_STRIDE=40 | tela PRETA (quebra os buffers 24B legítimos) |
+| Auto-fix stride por tamanho | size-match | colisão de tamanho (virou 32), pior |
+| Auto-fix stride por estrutura UV | detecta {24..48} 85% | **TRIÂNGULOS/geometria APARECERAM** (0.533 branco)! mas detectou 48 (errado, distorce skinned) |
+| Auto-fix stride 40 estrito | ok40>90% & ok24<70% | 0 hits (terreno usa UV tiling >1, range apertado) |
+
+**🔑 CAUSA-RAIZ: o chão (e provavelmente árvores/props) é desenhado ligando o buffer da variante
+0x7F (40 bytes: pos+uv+normal+cor+tangent) MAS configurando os atributos com stride do formato
+0x7 (24 bytes: pos+cor+uv). A GPU lê os vértices no passo errado → posições/UVs erradas → branco.**
+Os 24 PRIMEIROS bytes do vértice 0x7F batem com 0x7 (pos@0 cor@12 uv@16) — por isso v0 sempre ok.
+**Por que:** a variante 0x7 (24B) FALHOU de criar (erro format-0), o engine caiu p/ a variante
+0x7F (40B) mas manteve atributos de 0x7. → format-0 IMPORTA, mas o fix não é o formato do buffer
+e sim **fazer a variante 0x7 existir** OU corrigir o stride do atributo no draw.
+
+**PROGRESSO:** forçar o stride certo FAZ a geometria aparecer (triângulos). Falta detecção exata
+do stride por buffer (heurística UV frágil pq terreno tem UV de tiling). PRÓXIMO: detecção robusta
+(testar stride por validade de POSIÇÃO contígua, não UV) OU criar a variante 0x7 de verdade
+(re-interleave dos dados 0x7F→0x7 no createvb quando format-0).
