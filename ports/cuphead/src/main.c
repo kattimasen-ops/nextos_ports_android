@@ -738,7 +738,7 @@ long my_waitall(void *thiz, long a1) {
  * e clampamos w1 a um máximo são (>nº real de threads ~20) → mata o storm.
  * Prólogo clobberado (4 stp em 0x65850c..0x658518); o tramp re-executa e segue +16. */
 uintptr_t g_signal_cont = 0;   /* 0x65850c + 16 */
-static int g_signal_clamp = 48;
+static int g_signal_clamp = 4096;  /* passa counts legítimos (~dezenas/centenas), só pega o storm */
 static volatile unsigned g_signal_clamps = 0;
 __asm__(
   ".text\n"
