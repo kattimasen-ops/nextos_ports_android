@@ -428,6 +428,9 @@ int so_resolve(DynLibFunction *funcs, int num_funcs,
                 break;
               }
             }
+            if (getenv("NFS_ZTVLOG") && strncmp(name, "_ZTVN10__cxxabiv1", 17) == 0)
+              fprintf(stderr, "[ZTV] %s tabela=%s val=%p\n", name, found ? "SIM" : "nao",
+                      found ? (void *)*ptr : 0);
             if (!found) {
               /* softfp_shim: a engine é SOFTFP (double/float em regs inteiros);
                * o glibc libm é HARDFP. Intercepta as funções math com wrappers
@@ -438,6 +441,9 @@ int so_resolve(DynLibFunction *funcs, int num_funcs,
                * EGL, GLESv2). A TABELA tem prioridade (shims nossos vencem). */
               if (!p) p = dlsym(RTLD_DEFAULT, name);
               if (p) { *ptr = (uintptr_t)p; found = 1; }
+              if (getenv("NFS_ZTVLOG") && strncmp(name, "_ZTVN10__cxxabiv1", 17) == 0)
+                fprintf(stderr, "[ZTV] %s -> %p (tabela=%s dlsym=%s)\n", name, p,
+                        "?", p ? "ok" : "NULL");
             }
             if (!found)
               fprintf(stderr,

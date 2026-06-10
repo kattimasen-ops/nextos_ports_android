@@ -296,7 +296,7 @@ int main(int argc, char *argv[]) {
       }
     debugPrintf("real __dynamic_cast=%p\n", g_real_dynamic_cast);
     extern void nfs_install_dyncast_hook(void);
-    nfs_install_dyncast_hook(); }
+    if (!getenv("NFS_NOHOOK")) nfs_install_dyncast_hook(); }
   if (load_module("libNimble.so", 4, 1) < 0) return 1;      /* bridge JNI */
   if (load_module("libfmodex.so", 8, 1) < 0) return 1;      /* áudio FMOD */
   if (load_module("libfmodevent.so", 8, 1) < 0) return 1;

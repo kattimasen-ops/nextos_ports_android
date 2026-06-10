@@ -370,6 +370,27 @@ static void *my_dynamic_cast(const void *sub, const void *src, const void *dst, 
                         ? *(const void *const *)((const char *)g_last_dcast_vt - 4) : 0;
   { struct dcrec *r = &g_dcring[g_dcring_i++ % DCRING];
     r->sub = sub; r->vt = g_last_dcast_vt; r->dst = dst; r->caller = g_last_dcast_caller; }
+  /* detecta o NÓ SELVAGEM: a vtable do objeto (*sub) tem que estar na IMAGEM do
+   * libapp (.rodata/.data.rel.ro). Se cair fora, sub aponta p/ heap/asset = nó
+   * inválido. Loga o 1º selvagem + contexto. NFS_WILDLOG=1. */
+  if (getenv("NFS_WILDLOG") && sub && g_last_dcast_vt) {
+    extern void *text_base, *data_base; extern size_t text_size, data_size;
+    uintptr_t vt = (uintptr_t)g_last_dcast_vt;
+    int in_img = ((vt >= (uintptr_t)text_base && vt < (uintptr_t)text_base + text_size) ||
+                  (vt >= (uintptr_t)data_base && vt < (uintptr_t)data_base + data_size));
+    static int wn = 0, total = 0; total++;
+    if (!in_img && wn < 8) {
+      const unsigned char *b = (const unsigned char *)sub;
+      fprintf(stderr, "[WILD-NODE] #%d apos %d casts: sub=%p vt=%p (FORA da imagem libapp) caller=%p\n",
+              wn, total, sub, (void *)vt, g_last_dcast_caller);
+      fprintf(stderr, "  obj bytes:");
+      if (mem_readable(sub, 32)) { for (int q = 0; q < 8; q++) fprintf(stderr, " %08x", ((const uint32_t *)sub)[q]); }
+      fprintf(stderr, "\n  obj ascii: ");
+      if (mem_readable(sub, 32)) for (int q = 0; q < 32; q++) fprintf(stderr, "%c", (b[q] >= 32 && b[q] < 127) ? b[q] : '.');
+      fprintf(stderr, "\n");
+      wn++;
+    }
+  }
   /* dump da cadeia de type_info do objeto p/ achar a base corrompida */
   if (getenv("NFS_TICHAIN") && g_last_dcast_vt) {
     static int tn = 0;

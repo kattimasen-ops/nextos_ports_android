@@ -110,6 +110,31 @@ O `dynamic_cast` que crasha (em `0x46b6fc`, dentro de `0x46b220`) é:
 - Ferramentas prontas: NFS_TICHAIN (dump da cadeia type_info, c/ heurística __si/__vmi — tem falso-
   positivo em leaf __class_type_info, cuidado), NFS_RELRO (protege .data.rel.ro), g_dcring no crash.
 
+### 🔬 REFINO 2 (esta sessão) — RTTI é CONSISTENTE; nó é UAF/vptr-errado (shared_ptr)
+- ✅ **RTTI 100% consistente** (descartado mismatch de runtime): as 5 vtables de type_info
+  (`_ZTVN10__cxxabiv1...`) que libapp importa resolvem CERTO p/ a **libc++ BUNDLED** (val=base+0x8a7b0
+  etc., via snapshot de `.dynsym`). `__dynamic_cast`, type_infos (`_ZTI*`) e vtables: TODOS bundled.
+  Sem GNU/LLVM misturado. (Confirmado c/ NFS_ZTVLOG.)
+- ✅ **A recursão malformada é REAL da libcxxabi** (não é artefato do nosso hook): com `NFS_NOHOOK=1`
+  (sem inline-hook) o MESMO crash acontece (DCAST-REC dispara em +0x36, depois crasha).
+- **Mecânica exata**: o crash é `__dynamic_cast+0x36` = `ldr ip,[r0,#0x18]` com r0=`*r6`=vtable do
+  type_info-FONTE. r6 = `*(obj_vtable - 4)` (slot de typeinfo da vtable do objeto). Para um objeto
+  VÁLIDO (vtable=libapp+0xab3830) r6=0xab3854 (ok). No crash, r6 vira um ENDEREÇO DE CÓDIGO (ex:
+  0x47a920) → o slot de typeinfo da vtable lê uma FUNÇÃO VIRTUAL → vptr do objeto está **deslocado
+  (+4?) ou o objeto é LIXO**. (my WILD-NODE não pega pq vtable±4 ainda cai na imagem do libapp.)
+- **Hierarquia**: a Node deriva de `std::__ndk1::__shared_weak_count` (libapp importa
+  `_ZTINSt6__ndk119__shared_weak_countE`) = **refcount intrusivo estilo shared_ptr**. O loop
+  incrementa/decrementa refcount (ldrex/strex em [r5+4]) em cada nó.
+- **🎯 HIPÓTESE MAIS FORTE = USE-AFTER-FREE de nó shared_ptr**: um Node é liberado (refcount→0) mas
+  ainda está no array → memória reusada → vptr vira lixo → dcast lê typeinfo errado → crash. Casa com
+  a heap-dependência (lixo muda c/ PAD/layout). Possível causa do refcount errado: ABI dos atomics
+  (ldrex/strex ok?), OU nossa my_dynamic_cast/DCAST-REC retornando NULL quebra a lógica de posse, OU
+  o __shared_weak_count::__release_shared (vtable[?]) chama deleter cedo demais.
+- **PRÓXIMO PASSO**: (1) checar refcount: logar [node+4] (contador) de cada nó no loop — se algum
+  chega a 0/negativo durante a iteração = UAF. (2) testar SEM my_dynamic_cast/DCAST-REC (NFS_NOHOOK +
+  retornar real puro) p/ ver se nossa intervenção no dcast quebra a posse. (3) inspecionar
+  0x46ad50+ (incremento de refcount no loop) e onde os nós são liberados.
+
 ### (antigo) caracterização genérica do ponteiro selvagem (ainda válida)
 - O objeto passado ao dynamic_cast tem vtable apontando p/ lixo. Os valores ("HT=1", "TDBG") são
   **ASCII e MUDAM** conforme PAD/ctors (não são tags fixas; NÃO existem em libapp nem no OBB) →
