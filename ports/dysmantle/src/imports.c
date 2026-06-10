@@ -552,6 +552,27 @@ static void my_glShaderSource(unsigned sh, int count, const char *const *str,
       fprintf(stderr, "%.*s", len && len[i] > 0 ? len[i] : 2000, str[i]);
     fprintf(stderr, "\n[/SHADER src #%u]\n", sh);
   }
+  /* DIAG: força fragment shaders do sprite a sair VERMELHO sólido p/ localizar
+   * a geometria. Reescreve atribuições conhecidas de gl_FragColor. */
+  if (count == 1 && getenv("DYSMANTLE_SHADER_RED")) {
+    const char *s = str[0];
+    if (s && strstr(s, "gl_FragColor") && strstr(s, "texture2D")) {
+      static char nb[16384];
+      size_t L = (len && len[0] > 0) ? (size_t)len[0] : strlen(s);
+      if (L < sizeof(nb) - 64) {
+        memcpy(nb, s, L); nb[L] = 0;
+        /* injeta override no fim do main: acha último '}' e insere antes */
+        char *last = strrchr(nb, '}');
+        if (last) {
+          char tail[64]; snprintf(tail, sizeof(tail), "gl_FragColor=vec4(1.0,0.0,0.0,1.0);}");
+          strcpy(last, tail);
+          const char *p = nb; int nl = (int)strlen(nb);
+          if (real) real(sh, 1, &p, &nl);
+          return;
+        }
+      }
+    }
+  }
   if (real) real(sh, count, str, len);
 }
 static void my_glCompileShader(unsigned sh) {
