@@ -50,10 +50,14 @@ char __sF[3 * 512];
  * glibc = 152B (sigset_t=128B). Se chamar a glibc direto no oldact (buffer bionic de 32B) -> estoura a stack.
  * Campos bsa_* p/ não colidir com as MACROS sa_handler/sa_sigaction da glibc. */
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 struct bionic_sigaction { int bsa_flags; void *bsa_handler; unsigned long bsa_mask; void *bsa_restorer; };
 int my_sigaction(int sig, const struct bionic_sigaction *act, struct bionic_sigaction *oldact) {
   struct sigaction ga, go; struct sigaction *pga = NULL, *pgo = NULL;
+  /* CUP_NOSIGH: NÃO deixa o engine instalar handler de sinais de crash -> nosso
+   * handler pega o fault ORIGINAL (em vez do re-raise do crash handler do Unity). */
+  if (getenv("CUP_NOSIGH") && (sig==4||sig==5||sig==6||sig==7||sig==8||sig==11)) { (void)oldact; return 0; }
   if (act) {
     memset(&ga, 0, sizeof ga); ga.sa_flags = act->bsa_flags;
     if (act->bsa_flags & SA_SIGINFO) ga.sa_sigaction = (void (*)(int, siginfo_t *, void *))act->bsa_handler;

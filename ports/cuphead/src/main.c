@@ -165,7 +165,14 @@ static void *egl_route(const char *nm) {
 static const unsigned char *(*r_glGetString)(unsigned) = NULL;
 static const unsigned char *g_glcache[5] = {0,0,0,0,0};
 static int glstr_idx(unsigned n){ switch(n){case 0x1F00:return 0;case 0x1F01:return 1;case 0x1F02:return 2;case 0x1F03:return 3;case 0x8B8C:return 4;} return -1; }
+/* GL_EXTENSIONS curado curto: a string real do Mali-450 é longa e o parser do
+ * Unity pode estourar um buffer fixo (stack smash em nativeRecreateGfxState). */
+static const char *GL_EXT_SHORT =
+  "GL_OES_depth24 GL_OES_element_index_uint GL_OES_texture_npot "
+  "GL_OES_rgb8_rgba8 GL_OES_packed_depth_stencil GL_OES_vertex_array_object "
+  "GL_EXT_texture_format_BGRA8888 GL_OES_standard_derivatives";
 static const unsigned char *my_glGetString(unsigned n){
+  if(n==0x1F03) return (const unsigned char*)GL_EXT_SHORT;   /* GL_EXTENSIONS curto */
   if(!r_glGetString) r_glGetString=(const unsigned char*(*)(unsigned))dlsym(RTLD_DEFAULT,"glGetString");
   const unsigned char *s = r_glGetString ? r_glGetString(n) : NULL;
   int i = glstr_idx(n);
@@ -221,6 +228,23 @@ static int sh_key_delete(unsigned k) { (void)k; return 0; }
 static void *sh_getspecific(unsigned k) { if ((int)k <= 0 || (int)k >= NSLOT) return NULL; return tls_slots()[(int)k]; }
 static int sh_setspecific(unsigned k, const void *v) { if ((int)k <= 0 || (int)k >= NSLOT) return 22; tls_slots()[(int)k] = (void *)v; return 0; }
 
+/* ---------- abort/raise/tgkill: loga o CALLER (achar a origem do fatal) ---------- */
+static uintptr_t g_unity_base = 0, g_il2cpp_base = 0;
+static void map_caller(const char *tag, uintptr_t ra) {
+  if (g_unity_base && ra >= g_unity_base && ra < g_unity_base + 0x2000000)
+    fprintf(stderr, "%s caller=libunity+0x%lx\n", tag, ra - g_unity_base);
+  else if (g_il2cpp_base && ra >= g_il2cpp_base && ra < g_il2cpp_base + 0x3000000)
+    fprintf(stderr, "%s caller=libil2cpp+0x%lx\n", tag, ra - g_il2cpp_base);
+  else fprintf(stderr, "%s caller=0x%lx (?)\n", tag, ra);
+  fflush(stderr);
+}
+static int my_raise(int sig) { map_caller("[RAISE]", (uintptr_t)__builtin_return_address(0));
+  fprintf(stderr, "[RAISE] sig=%d\n", sig); if (getenv("CUP_NORAISE")) return 0; return raise(sig); }
+static void my_abort(void) { map_caller("[ABORT]", (uintptr_t)__builtin_return_address(0));
+  if (getenv("CUP_NORAISE")) return; abort(); }
+static int my_tgkill(int tgid, int tid, int sig) { map_caller("[TGKILL]", (uintptr_t)__builtin_return_address(0));
+  fprintf(stderr, "[TGKILL] sig=%d\n", sig); if (getenv("CUP_NORAISE")) return 0; return syscall(__NR_tgkill, tgid, tid, sig); }
+
 /* ---------- helper: override import na tabela ---------- */
 static void set_import(const char *name, void *fn) {
   for (size_t i = 0; i < dynlib_numfunctions; i++)
@@ -254,6 +278,10 @@ int main(int argc, char **argv) {
   if (so_relocate() < 0) { fprintf(stderr, "relocate FALHOU\n"); return 1; }
 
   /* overrides */
+  g_unity_base = (uintptr_t)text_base;
+  set_import("abort", (void *)my_abort);
+  set_import("raise", (void *)my_raise);
+  set_import("tgkill", (void *)my_tgkill);
   set_import("glGetString", (void *)my_glGetString);
   set_import("sysconf", (void *)my_sysconf);
   set_import("fopen", (void *)my_fopen);
@@ -302,6 +330,7 @@ int main(int argc, char **argv) {
   size_t i2s = 96UL * 1024 * 1024;
   void *i2heap = mmap(NULL, i2s, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (i2heap != MAP_FAILED && so_load("libil2cpp.so", i2heap, i2s) >= 0) {
+    g_il2cpp_base = (uintptr_t)text_base;
     fprintf(stderr, "[F1] libil2cpp: text=%p+%zu\n", text_base, text_size);
     so_relocate();
     so_resolve(dynlib_functions, dynlib_numfunctions, 0);
