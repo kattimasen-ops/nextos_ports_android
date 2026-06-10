@@ -38,12 +38,12 @@ static int b_log_write(int prio, const char *tag, const char *text) {
   fprintf(stderr, "[ALOG:%d %s] %s\n", prio, tag ? tag : "?", text ? text : "");
   return 0;
 }
+/* NÃO faz vfprintf dos varargs (o jogo passa %s com ponteiros que podem estar
+ * ruins na falha de textura -> memcpy crash) e NÃO aborta (a engine usa
+ * __android_log_assert como log não-fatal aqui). */
 static void b_log_assert(const char *cond, const char *tag, const char *fmt, ...) {
-  va_list ap; va_start(ap, fmt);
-  fprintf(stderr, "[ALOG-ASSERT %s] cond=%s ", tag ? tag : "?", cond ? cond : "?");
-  if (fmt) vfprintf(stderr, fmt, ap);
-  fprintf(stderr, "\n"); va_end(ap);
-  abort();
+  (void)fmt;
+  fprintf(stderr, "[ALOG-ASSERT %s] %s\n", tag ? tag : "?", cond ? cond : "");
 }
 
 /* ---------------- bionic libc ---------------- */
@@ -59,7 +59,15 @@ static int    b_sys_prop_get(const char *name, char *value) {
   (void)name; if (value) value[0] = '\0'; return 0;
 }
 /* __emutls_get_address vem do libgcc (linkado estático no loader). */
-extern void *__emutls_get_address(void *);
+extern void *__emutls_get_address_real(void *) __asm__("__emutls_get_address");
+static void *__emutls_get_address(void *c) {
+  void *r = __emutls_get_address_real(c);
+  static int n = 0;
+  if ((uintptr_t)r < 0x10000 && n < 10) {
+    fprintf(stderr, "[EMUTLS] control=%p -> r=%p (SUSPEITO!)\n", c, r); n++;
+  }
+  return r;
+}
 
 /* bionic __sF[3] = stdin/out/err (libc++ usa p/ std::cerr/cout). UNRESOLVED ->
  * std::cerr na cadeia de erro do bitmap -> PLT loop/crash. Provemos o array +
@@ -223,6 +231,14 @@ static void *my_fopen(const char *path, const char *mode) {
     if (fp && c < 70) { fprintf(stderr, "[fopen] -> redirect assets/%s OK\n", path); }
   }
   return fp;
+}
+/* força stack grande nas threads do jogo: a worker de loading tem cadeia de
+ * parsing profunda; a stack pedida (bionic ~1MB) pode estourar sob glibc. */
+static int my_attr_setstacksize(void *attr, size_t sz) {
+  static int (*real)(void *, size_t) = NULL;
+  if (!real) real = dlsym(RTLD_DEFAULT, "pthread_attr_setstacksize");
+  if (sz < 8u * 1024 * 1024) sz = 8u * 1024 * 1024;
+  return real(attr, sz);
 }
 static long my_read_chk(int fd, void *buf, size_t n, size_t buflen) {
   static long (*real)(int, void *, size_t) = NULL;
@@ -398,12 +414,8 @@ DynLibFunction dysmantle_overrides[] = {
   {"glGetIntegerv", (uintptr_t)my_glGetIntegerv},
   {"glGetStringi", (uintptr_t)my_glGetStringi},
   {"glGetError", (uintptr_t)my_glGetError},
-  {"read", (uintptr_t)my_read},
+  {"pthread_attr_setstacksize", (uintptr_t)my_attr_setstacksize},
   {"fopen", (uintptr_t)my_fopen},
-  {"fread", (uintptr_t)my_fread},
-  {"fseek", (uintptr_t)my_fseek},
-  {"_ZNSt6__ndk113basic_filebufIcNS_11char_traitsIcEEE4openEPKcj", (uintptr_t)my_filebuf_open},
-  {"__read_chk", (uintptr_t)my_read_chk},
   {"__stack_chk_fail", (uintptr_t)my_stack_chk_fail},
   /* ANativeWindow */
   {"ANativeWindow_fromSurface", (uintptr_t)aw_fromSurface},
