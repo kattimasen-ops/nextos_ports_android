@@ -23,7 +23,8 @@
 #include <sys/syscall.h>
 static int stid(void) { return (int)syscall(SYS_gettid); }
 
-#define MAX_SEMS 512
+#define MAX_SEMS 8192   /* 512 estourava no carregamento do título (Unity "Failed to post
+                           to a semaphore"=nosso sh_sem_post retornava -1=sem slot livre) */
 struct mysem { void *key; pthread_mutex_t m; pthread_cond_t c; int count; int used;
                int wtid[6]; int nwt; };  /* tids distintos que já esperaram (p/ filtro de tick) */
 static struct mysem g_sems[MAX_SEMS];

@@ -428,6 +428,20 @@ static void *jni_CallObjectMethodV(void *env, void *obj, void *methodID,
       void *keystr = va_arg(ap, void *);
       void *defstr = va_arg(ap, void *);
       const char *key = resolve_jstring(keystr);
+      /* CUP_NOFX: força o jogo a CARREGAR settings com PÓS-PROCESSAMENTO OFF
+         (chromaticAberration/noise/blur) — esses efeitos usam FBO/render-to-texture
+         que TRAVAM o GPU Mali Utgard no carregamento do título. */
+      if (getenv("CUP_NOFX") && key && strstr(key, "settings_data")) {
+        static const char *FX_OFF =
+          "{\"hasBootedUpGame\":true,\"overscan\":0.0,\"chromaticAberration\":0.0,"
+          "\"screenWidth\":1280,\"screenHeight\":720,\"effects\":false,\"blur\":false,"
+          "\"forceOriginalTitleScreen\":false,\"masterVolume\":0.0,\"sFXVolume\":0.0,"
+          "\"musicVolume\":0.0,\"canVibrate\":true,\"rotateControlsWithCamera\":false,"
+          "\"language\":-1,\"chromaticAberrationEffect\":false,\"noiseEffect\":false,"
+          "\"subtleBlurEffect\":false,\"brightness\":0.0}";
+        debugPrintf("[NOFX] getString settings -> efeitos OFF (anti-wedge Utgard)\n");
+        return make_jstring(FX_OFF);
+      }
       const char *stored = prefs_get_string(key);
       debugPrintf("[PREFS] getString key='%s' -> %s\n", key, stored ? "ARMAZENADO" : "default");
       if (stored) return make_jstring(stored);
@@ -461,6 +475,9 @@ static unsigned char jni_CallBooleanMethod(void *env, void *obj,
       va_list ap; va_start(ap, methodID);
       void *keyo = va_arg(ap, void *); va_end(ap);
       const char *key = resolve_jstring(keyo);
+      /* CUP_NOFX: força contains=true p/ as settings → o jogo CARREGA (getString) em
+         vez de criar defaults (com efeitos ON). */
+      if (getenv("CUP_NOFX") && key && strstr(key, "settings_data")) return 1;
       int has = getenv("CUP_NOCONTAINS") ? 0 : prefs_contains(key);
       debugPrintf("[PREFS] contains key='%s' -> %d\n", key, has);
       return (unsigned char)has;
