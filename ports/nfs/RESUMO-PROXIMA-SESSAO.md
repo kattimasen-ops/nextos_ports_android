@@ -94,11 +94,16 @@ O `dynamic_cast` que crasha (em `0x46b6fc`, dentro de `0x46b220`) é:
   (`[sl+24]`) tem uma entrada que aponta p/ DADOS de heap/asset (não um Node real). O dcast nesse
   ponteiro selvagem lê *obj=vtable-falsa→typeinfo-falso→handler=lixo("HT=1"/"TDBG"/"HAIN"/"DLRO",
   muda c/ heap) → blx em lixo. **Ponteiro de nó inválido / use-after-free / slot não inicializado.**
-- **PRÓXIMO PASSO (achar de onde vem o nó selvagem)**: instrumentar a CONSTRUÇÃO/preenchimento do
-  array de nós `[sl+24]`. O loop que itera e casta está em torno de 0x46ad3c-0x46aff0; o array é
-  preenchido ANTES (na mesma função ou nos callers 0x3de064/0x46b958/0x43c6fc). Hookar onde os nós
-  são alocados/inseridos e logar cada ponteiro; o que aponta p/ fora das faixas de heap válidas (ou
-  é freed) é o culpado. Tipos de Node: desmangle `N2im4isis9shadergenXX...E`.
+- **ESTRUTURA DO LOOP (mapeada)**: em `0x46ad34`+: `r6`=contador (de 0), elemento
+  `r5 = [r4 + r6*12]` (**stride 12 bytes/entrada**; 1ª palavra = ponteiro do nó + refcount em r5+4).
+  Se `r5==0` pula. Fim do loop em `0x46afe0`: `cmp r6, [sp+12]` (count). `r4`=base do array e
+  `[sp+12]`=count são setados ANTES de 0x46ace0 (achar onde — se count estiver grande demais, o loop
+  lê ALÉM do fim → entradas selvagens; OU `r4` aponta errado). Há um 2º array em `[sl+24]` (usado em
+  0x46afd0: `[r0+r8<<2]`).
+- **PRÓXIMO PASSO**: (1) desmontar de ~0x46ac00 p/ trás achando onde `r4`(array) e `[sp+12]`(count)
+  vêm — ver se count é misparse. (2) instrumentar: hookar 0x46ad34 (ou logar no my_dynamic_cast o
+  índice `r6`=[sp+20] e o elemento) p/ ver em qual índice o nó fica selvagem e se é > count real.
+  Tipos: desmangle `N2im4isis9shadergenXX...E`.
 - **Hipótese forte = use-after-free OU ABI**: um Node é construído por uma função cujo retorno
   (ponteiro) vem errado por ABI (ex: softfp/struct-return) OU um Node é liberado e o slot reusado.
   Conferir se alguma factory de Node retorna ponteiro via registrador/struct que nosso ABI erra.
