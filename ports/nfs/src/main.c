@@ -142,6 +142,7 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
   install_crash_handler();
+  setvbuf(stdout, NULL, _IONBF, 0); /* logs visíveis no crash (init_array era a causa, não isto) */
   debugPrintf("=== NFS Most Wanted — loader ARMHF (Mali-450) ===\n");
 
   /* base = shims bionic→glibc (os 18 que o dlsym fallback não cobre) */

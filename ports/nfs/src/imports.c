@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <malloc.h>
+#include <dlfcn.h>
 #include <string.h>
 
 #include "so_util.h"
@@ -87,6 +88,21 @@ static void *pad_calloc(size_t a, size_t b) {
 static void *pad_realloc(void *p, size_t n) { return realloc(p, n + NFS_PAD); }
 static void *pad_memalign(size_t al, size_t n) { return memalign(al, n + NFS_PAD); }
 
+/* ---- pthread_create hook: loga a função de entrada de cada thread (p/
+ * identificar a worker thread que crasha no init). NFS_PTLOG=1 liga. ---- */
+static int (*real_pthread_create)(void *, const void *, void *(*)(void *), void *);
+static int my_pthread_create(void *th, const void *attr, void *(*fn)(void *), void *arg) {
+  if (!real_pthread_create) {
+    real_pthread_create = (int (*)(void *, const void *, void *(*)(void *), void *))
+        dlsym(RTLD_DEFAULT, "pthread_create");
+  }
+  if (getenv("NFS_PTLOG")) {
+    static int n = 0;
+    if (n < 40) { fprintf(stderr, "[pthread_create] #%d fn=%p arg=%p\n", n, (void *)fn, arg); n++; }
+  }
+  return real_pthread_create(th, attr, fn, arg);
+}
+
 /* ---- stubs ---- */
 static int b_dso_handle;                       /* __dso_handle = endereço dummy */
 static void *b_cxa_type_match(void *a, void *b, char c) { (void)a; (void)b; (void)c; return (void *)0; }
@@ -97,6 +113,7 @@ static int abm_lock(void *env, void *bmp, void **pix) { (void)env; (void)bmp; if
 static int abm_unlock(void *env, void *bmp) { (void)env; (void)bmp; return 0; }
 
 DynLibFunction nfs_shims[] = {
+    {"pthread_create", (uintptr_t)my_pthread_create},
     {"malloc", (uintptr_t)pad_malloc},
     {"calloc", (uintptr_t)pad_calloc},
     {"realloc", (uintptr_t)pad_realloc},
