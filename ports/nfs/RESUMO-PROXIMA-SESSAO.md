@@ -110,7 +110,39 @@ O `dynamic_cast` que crasha (em `0x46b6fc`, dentro de `0x46b220`) é:
 - Ferramentas prontas: NFS_TICHAIN (dump da cadeia type_info, c/ heurística __si/__vmi — tem falso-
   positivo em leaf __class_type_info, cuidado), NFS_RELRO (protege .data.rel.ro), g_dcring no crash.
 
-### 🔬 REFINO 2 (esta sessão) — RTTI é CONSISTENTE; nó é UAF/vptr-errado (shared_ptr)
+### 🔬 REFINO 3 (esta sessão) — crash é na CLASSIFICAÇÃO de type_info da libcxxabi
+- O nó castado é VÁLIDO (refcount=1, vtable na imagem libapp). NÃO é UAF nem nó selvagem.
+- A função libc++ envolvida na recursão que crasha é **`0x6f878` = índice 4 da vtable do
+  `__si_class_type_info`** (vtable @0x8a7d8: [4]=0x6f879, [6]=0x700c1). Ela carrega DOIS type_infos
+  FIXOS da libcxxabi (`_ZTIN10__cxxabiv1...` = __si e __vmi) e faz `dynamic_cast(arg1, __si, __vmi)`
+  → é a libcxxabi **CLASSIFICANDO um type_info** (descobrindo se é __si ou __vmi) durante o walk.
+- ❌ NÃO é exceção: libapp NÃO importa `__cxa_throw/_Unwind_/personality` (sem máquina de exceção).
+- **Mecânica do crash**: a chamada interna recebe arg1 = ponteiro p/ um local cujo 1º word é um
+  type_info (0xab36a4=Node ti). O dcast trata isso como vtable → lê `[0xab36a4-4]`=0x47a920 (CÓDIGO)
+  como typeinfo → `*0x47a920`=0xe12fff1e → `[+0x18]`=lixo → blx em lixo (heap-dependente).
+- Ou seja: a libcxxabi, ao classificar um type_info do walk, recebe/computa um ponteiro de objeto
+  ERRADO (aponta p/ um holder de type_info, não p/ o type_info em si). Sutil — provável diferença de
+  layout/ABI de type_info OU o __dynamic_cast interno recebe args trocados no nosso ambiente.
+- **PRÓXIMO PASSO (precisa de runtime preciso)**: GDB no device (sem python; usar -no-pie + breakpoint
+  por scan) OU hookar `0x700c1` (__do_dyncast) e `0x6f878` p/ logar args (this, info, obj, path) e ver
+  qual ponteiro está deslocado. Comparar com o fonte da libcxxabi (__class_type_info::process_*).
+  Alternativa: testar se DESLIGAR nosso my_dynamic_cast (passthrough puro do real, sem validação/REC)
+  muda algo — nossa intervenção pode estar passando args errados na recursão interna.
+
+### ✅❌ TUDO ESTRUTURAL DESCARTADO (precisa de GDB no device agora)
+Verificado e CORRETO: relocações libapp E libc++ (R_ARM_ABS32/RELATIVE aplicadas), headers RTTI das
+vtables de type_info (0x8a7dc etc. relocam p/ os _ZTIN... certos), resolução cross-módulo (type_info
+vtables+objetos→bundled libc++ via snapshot .dynsym/.symtab), relro intacto, nós válidos (refcount
+ok). A máquina RTTI está toda consistente e bem montada. O crash é um ponteiro computado errado
+DENTRO do walk da libcxxabi — sutil demais p/ análise estática. **PRÓXIMA SESSÃO: GDB no device**
+(gdbserver, breakpoint em 0x700c1=__do_dyncast e 0x6f878, single-step, ver qual arg/ponteiro desvia)
+OU comparar com o fonte exato da libcxxabi (versão do NDK do APK) das funções __do_dyncast/process_*.
+Possível ângulo não testado: o `this`/`obj`/`offset_to_top` passado ao handler pode estar deslocado
+por um detalhe de ABI (ex: a engine é SOFTFP — improvável aqui, são ints — ou o __dynamic_cast tem
+um 5º aspecto). Tooling pronto: NFS_TICHAIN, NFS_RCLOG, NFS_WILDLOG, NFS_ZTVLOG, NFS_NOHOOK, NFS_RELRO,
+g_dcring no crash.
+
+### 🔬 REFINO 2 — RTTI é CONSISTENTE; nó NÃO é UAF (refcount saudável)
 - ✅ **RTTI 100% consistente** (descartado mismatch de runtime): as 5 vtables de type_info
   (`_ZTVN10__cxxabiv1...`) que libapp importa resolvem CERTO p/ a **libc++ BUNDLED** (val=base+0x8a7b0
   etc., via snapshot de `.dynsym`). `__dynamic_cast`, type_infos (`_ZTI*`) e vtables: TODOS bundled.

@@ -370,6 +370,21 @@ static void *my_dynamic_cast(const void *sub, const void *src, const void *dst, 
                         ? *(const void *const *)((const char *)g_last_dcast_vt - 4) : 0;
   { struct dcrec *r = &g_dcring[g_dcring_i++ % DCRING];
     r->sub = sub; r->vt = g_last_dcast_vt; r->dst = dst; r->caller = g_last_dcast_caller; }
+  /* teste UAF: loga o refcount [sub+4] e validade da vtable dos nós castados.
+   * Se um nó tem vtable inválida E refcount 0/lixo = use-after-free. NFS_RCLOG=1. */
+  if (getenv("NFS_RCLOG") && sub) {
+    extern void *text_base, *data_base; extern size_t text_size, data_size;
+    uintptr_t vt = (uintptr_t)g_last_dcast_vt;
+    int in_img = ((vt >= (uintptr_t)text_base && vt < (uintptr_t)text_base + text_size) ||
+                  (vt >= (uintptr_t)data_base && vt < (uintptr_t)data_base + data_size));
+    static int rn = 0;
+    unsigned rc = mem_readable((const char *)sub + 4, 4) ? *(const unsigned *)((const char *)sub + 4) : 0xBAD;
+    if (rn < 40) {
+      fprintf(stderr, "[RC] #%d sub=%p vt=%p img=%d refcount=%u%s\n", rn, sub, (void *)vt,
+              in_img, rc, in_img ? "" : "  <<< VTABLE FORA DA IMAGEM");
+      rn++;
+    }
+  }
   /* detecta o NÓ SELVAGEM: a vtable do objeto (*sub) tem que estar na IMAGEM do
    * libapp (.rodata/.data.rel.ro). Se cair fora, sub aponta p/ heap/asset = nó
    * inválido. Loga o 1º selvagem + contexto. NFS_WILDLOG=1. */
