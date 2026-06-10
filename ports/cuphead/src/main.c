@@ -149,7 +149,64 @@ static void crash_dump_qwords(const char *tag, uintptr_t base, int n) {
 }
 
 static volatile int g_crashing = 0;
+#define ARENA_LO 0x7f10000000UL
+#define ARENA_HI 0x7f10200000UL
+static volatile unsigned long g_skipbad_n = 0;
+static int g_skipbad = 0;  /* lido 1× no startup (getenv não é async-signal-safe) */
+/* recovery por-frame: sigsetjmp antes de nativeRender; on_crash siglongjmp de volta
+   (só se o crash for na THREAD de render — longjmp cross-thread é UB). Pula o frame
+   corrompido e continua → renderiza apesar das chamadas de método C# corrompidas. */
+#include <setjmp.h>
+/* GC stop-the-world: SIGPWR suspende a thread (espera o restart SIGXCPU); SIGXCPU
+   é no-op (sua chegada acorda o sigsuspend). Mantém nossas threads vivas durante a
+   coleta (sem isso, SIGPWR default mata o processo -> exit 158). */
+void gc_suspend_handler(int sig);
+void gc_suspend_handler(int sig) {
+  (void)sig;
+  sigset_t m; sigfillset(&m);
+  sigdelset(&m, SIGXCPU); sigdelset(&m, SIGSEGV); sigdelset(&m, SIGBUS);
+  sigsuspend(&m);   /* retorna quando SIGXCPU (restart) chega */
+}
+void gc_restart_handler(int sig);
+void gc_restart_handler(int sig) { (void)sig; }
+static sigjmp_buf g_render_jmp;
+static volatile int g_render_jmp_armed = 0;
+static int g_render_tid = 0;
+static volatile unsigned long g_recover_n = 0;
 static void on_crash(int sig, siginfo_t *si, void *uc_) {
+  ucontext_t *uc0 = (ucontext_t *)uc_;
+  uintptr_t pc0 = uc0->uc_mcontext.pc, lr0 = uc0->uc_mcontext.regs[30];
+  /* recovery: crash na thread de render (qualquer fault, não só arena) → volta pro
+     loop e pula o frame. Só se armado e na thread certa. */
+  if (g_render_jmp_armed && (int)syscall(SYS_gettid) == g_render_tid) {
+    g_recover_n++;
+    siglongjmp(g_render_jmp, 1);
+  }
+  /* skipbad: crash em thread NÃO-render (worker/job) → estaciona a thread em vez de
+     matar o processo (mantém o jogo vivo p/ a render continuar). */
+  if (g_skipbad && sig == SIGSEGV) {
+    static volatile unsigned long parked = 0;
+    if (parked++ < 40)
+      fprintf(stderr, "[PARK] worker tid=%d crashou (pc=0x%lx) — estacionado\n",
+              (int)syscall(SYS_gettid), (unsigned long)pc0);
+    dbg_sync();
+    for (;;) pause();
+  }
+  /* CUP_SKIPBAD: o ponteiro de método genérico corrompido (→ arena 2MB) é chamado
+     em vários sites. Se o pc cai na arena (chamou o lixo), PULA a chamada: retoma
+     no lr com retorno null (x0=0). Se as chamadas não forem críticas, o jogo passa
+     e renderiza. Hack p/ destravar a imagem (não é fix definitivo). */
+  if (g_skipbad && sig == SIGSEGV && pc0 >= ARENA_LO && pc0 < ARENA_HI) {
+    if (lr0 && lr0 != pc0) {
+      uc0->uc_mcontext.pc = lr0;        /* retoma no retorno */
+      uc0->uc_mcontext.regs[0] = 0;     /* valor de retorno = null/0 */
+      if (g_skipbad_n++ < 60)
+        fprintf(stderr, "[SKIPBAD] #%lu pc=arena -> pula p/ lr=0x%lx\n",
+                g_skipbad_n, (unsigned long)lr0);
+      if ((g_skipbad_n & 0x3ff) == 0) dbg_sync();
+      return;  /* resume */
+    }
+  }
   /* reentrância: se outra thread já está dumpando (vtable corrompido faz várias
      threads crasharem juntas), esta espera p/ não interleavar/re-faultar o dump. */
   if (__sync_lock_test_and_set(&g_crashing, 1)) {
@@ -996,6 +1053,23 @@ int main(int argc, char **argv) {
   }
   /* sigaltstack: p/ o handler reportar STACK OVERFLOW (SIGSEGV na guard page →
      sem espaço na pilha normal p/ rodar o handler → morte silenciosa). */
+  g_skipbad = getenv("CUP_SKIPBAD") ? 1 : 0;
+  /* CUP_GCSIG: Boehm GC suspende threads via SIGPWR(30)/restart SIGXCPU(24) p/
+     stop-the-world. Nossas threads (criadas via pthread_create_fake, fora do
+     registro do GC) recebem SIGPWR com ação DEFAULT = mata o processo (exit 158).
+     Instalamos handlers que implementam o protocolo (suspende+espera restart) p/
+     a thread não morrer. (my_sigaction bloqueia o engine de sobrescrever.) */
+  if (getenv("CUP_GCSIG")) {
+    extern void gc_suspend_handler(int), gc_restart_handler(int);
+    struct sigaction sp; memset(&sp, 0, sizeof sp);
+    sp.sa_handler = gc_suspend_handler; sigfillset(&sp.sa_mask);
+    sigdelset(&sp.sa_mask, SIGXCPU); sigdelset(&sp.sa_mask, SIGSEGV);
+    sigaction(SIGPWR, &sp, 0);
+    struct sigaction sr; memset(&sr, 0, sizeof sr);
+    sr.sa_handler = gc_restart_handler; sigemptyset(&sr.sa_mask);
+    sigaction(SIGXCPU, &sr, 0);
+    fprintf(stderr, "[GCSIG] handlers SIGPWR(suspend)+SIGXCPU(restart) instalados\n");
+  }
   { static char altstk[256 * 1024]; stack_t ss = {0};
     ss.ss_sp = altstk; ss.ss_size = sizeof altstk; ss.ss_flags = 0;
     sigaltstack(&ss, NULL); }
@@ -1236,6 +1310,10 @@ int main(int argc, char **argv) {
     patch_got("open", (void *)my_open);
     patch_got("mmap", (void *)my_mmap);
     patch_got("mmap64", (void *)my_mmap);
+    /* sigaction do libil2cpp (o GC instala SIGPWR/SIGXCPU por aqui). Sem patch, o GC
+       instalava um handler CORROMPIDO (0x7f10000004) p/ SIGPWR -> stop-the-world
+       crashava. Com my_sigaction + CUP_GCSIG, bloqueamos -> nosso handler válido fica. */
+    { extern int my_sigaction(); patch_got("sigaction", (void *)my_sigaction); }
     patch_got("fopen", (void *)my_fopen);
     patch_got("stat", (void *)my_stat);
     patch_got("lstat", (void *)my_lstat);
@@ -1348,9 +1426,22 @@ int main(int argc, char **argv) {
   fprintf(stderr, "[F2] nativeRender=%p -> loop\n", render);
   int max_f = getenv("CUP_FRAMES") ? atoi(getenv("CUP_FRAMES")) : 600;
   void *fpump = jni_find_native("nativePause");  /* só p/ existência */ (void)fpump;
+  g_render_tid = (int)syscall(SYS_gettid);   /* p/ recovery longjmp (CUP_SKIPBAD) */
   for (int f = 0; render && (max_f <= 0 || f < max_f); f++) {
     if (f < 200) { fprintf(stderr, "[r%d>\n", f); dbg_sync(); }  /* ENTRA no render */
-    ((unsigned char (*)(void *, void *))render)(env, &thiz);
+    if (g_skipbad) {
+      /* arma o recovery: se nativeRender crashar nesta thread, volta aqui e pula o frame */
+      if (sigsetjmp(g_render_jmp, 1) == 0) {
+        g_render_jmp_armed = 1;
+        ((unsigned char (*)(void *, void *))render)(env, &thiz);
+      } else {
+        if (g_recover_n < 80 || (g_recover_n % 60) == 0)
+          fprintf(stderr, "[RECOVER] frame %d pulado (crash #%lu na render)\n", f, g_recover_n);
+      }
+      g_render_jmp_armed = 0;
+    } else {
+      ((unsigned char (*)(void *, void *))render)(env, &thiz);
+    }
     if (f < 200) { fprintf(stderr, "<r%d]\n", f); dbg_sync(); }  /* SAIU do render */
     opensles_shim_pump_callbacks();
     /* bombeia eventos SDL (foco/janela) p/ o input do Unity não esfomear */
