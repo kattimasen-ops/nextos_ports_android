@@ -985,8 +985,10 @@ long my_start_cr(void *it) {
   int pc = *(int *)((char *)it + 0xBC);
   if (pc != lastpc)
     { fprintf(stderr, "[CRSPY] start_cr tick#%u $PC=%d f=%d\n", n, pc, g_render_frame); fsync(2); samepc = 0; }
-  else if (++samepc <= 3) {
-    fprintf(stderr, "[CRSPY] start_cr RE-ENTER $PC=%d (samepc=%u) f=%d\n", pc, samepc, g_render_frame); fsync(2);
+  else if (++samepc <= 4) {
+    void *cur = *(void **)((char *)it + 0xB0);
+    fprintf(stderr, "[CRSPY] start_cr RE-ENTER $PC=%d (samepc=%u) $cur=%p cls=%s f=%d\n",
+            pc, samepc, cur, il2cpp_classname(cur), g_render_frame); fsync(2);
   }
   else if (samepc % 180 == 0) {
     void *cur = *(void **)((char *)it + 0xB0);  /* $current (objeto yieldado) */
@@ -996,11 +998,14 @@ long my_start_cr(void *it) {
   lastpc = pc; n++;
   long r = cr1_tramp(it);
   int pc2 = *(int *)((char *)it + 0xBC);
+  void *cur = *(void **)((char *)it + 0xB0);
   if (pc2 != pc) {
-    void *cur = *(void **)((char *)it + 0xB0);
     fprintf(stderr, "[CRSPY] start_cr $PC %d -> %d (ret=%ld $cur=%p cls=%s f=%d)\n",
             pc, pc2, r, cur, il2cpp_classname(cur), g_render_frame);
     fsync(2); lastpc = pc2;
+  } else if (samepc <= 4) {
+    fprintf(stderr, "[CRSPY] start_cr POST $PC=%d ret=%ld $cur=%p cls=%s f=%d\n",
+            pc, r, cur, il2cpp_classname(cur), g_render_frame); fsync(2);
   }
   return r;
 }
@@ -1130,6 +1135,26 @@ int my_getanybuttondown(void *self) {
     }
   }
   return tapinput_tramp(self);
+}
+
+/* ===== CUP_SAPATH: override Application.get_streamingAssetsPath (il2cpp 0x17C7C1C) =====
+ * No so-loader o getter retorna "jar:file://!" (caminho do APK vazio) -> os
+ * AssetBundles do título (AssetBundle.LoadFromFile(streamingAssetsPath+"/AssetBundles/"+n))
+ * falham com "Unable to open archive file" -> NullReferenceException mata a coroutine
+ * de boot. Apontamos p/ um diretório REAL do filesystem (CUP_SAPATH=/storage/cuphead-sa)
+ * onde deployamos os bundles -> LoadFromFile abre o arquivo de verdade.
+ * Cria a string il2cpp 1× via il2cpp_string_new (não chama o original). */
+static void *g_sa_string = NULL;
+void *my_streamingAssetsPath(void);
+void *my_streamingAssetsPath(void) {
+  if (!g_sa_string && g_il2cpp_base) {
+    void *(*isn)(const char *) = (void *(*)(const char *))(g_il2cpp_base + 0x1b62c38); /* il2cpp_string_new */
+    const char *p = getenv("CUP_SAPATH"); if (!p) p = "/storage/cuphead-sa";
+    g_sa_string = isn(p);
+    fprintf(stderr, "[SAPATH] streamingAssetsPath -> \"%s\" (il2cpp str=%p)\n", p, g_sa_string);
+    fsync(2);
+  }
+  return g_sa_string;
 }
 
 static char g_dl_sl; /* sentinela do handle de libOpenSLES (FMOD → opensles_shim) */
@@ -1759,6 +1784,10 @@ int main(int argc, char **argv) {
       *(uint32_t *)(g_il2cpp_base + 0x9A56F4) = 0x14000006u; /* 0x9A56F4 tbz -> B 0x9A570C (proceed) */
       __builtin___clear_cache((char *)(g_il2cpp_base + 0x9A567C), (char *)(g_il2cpp_base + 0x9A56F8));
       fprintf(stderr, "[FORCESTARTCR] Start() early-returns NOPados -> StartCoroutine(start_cr) forçado\n");
+    }
+    if (getenv("CUP_SAPATH") || getenv("CUP_SAPATH_ON")) {
+      hook_arm64(g_il2cpp_base + 0x17C7C1C, (uintptr_t)my_streamingAssetsPath);
+      fprintf(stderr, "[SAPATH] hook get_streamingAssetsPath(0x17C7C1C)\n");
     }
     if (getenv("CUP_TAPINPUT")) {
       if (getenv("CUP_TAPSTART")) g_tap_start = atoi(getenv("CUP_TAPSTART"));
