@@ -1043,8 +1043,10 @@ static const char *il2cpp_classname(void *obj) {
   const char *nm = *(const char **)((char *)klass + 0x10);
   return (nm && ((uintptr_t)nm >> 40) == 0) ? nm : "(?)";
 }
+void *volatile g_startcr_it = NULL;  /* iterator do start_cr capturado (CUP_DRIVECR) */
 long my_start_cr(void *it) {
   static int lastpc = -99; static unsigned n, samepc;
+  g_startcr_it = it;
   int pc = *(int *)((char *)it + 0xBC);
   if (pc != lastpc)
     { fprintf(stderr, "[CRSPY] start_cr tick#%u $PC=%d f=%d\n", n, pc, g_render_frame); fsync(2); samepc = 0; }
@@ -1999,8 +2001,18 @@ int main(int argc, char **argv) {
   int drainWait = getenv("CUP_DRAINWAIT") ? 1 : 0;
   void (*wait_all)(void *) = drainWait ? (void (*)(void *))(g_unity_base + 0x873a90) : NULL;
   if (drainWait) fprintf(stderr, "[DRAINWAIT] WaitForAll(mgr)=0x873a90 1x/frame\n");
+  /* CUP_DRIVECR: o pump de coroutine do engine PARA de resumir o start_cr no $PC=9
+   * (Cuphead.Init/RefreshDLC) — render voa mas $PC fica preso. Dirigimos o MoveNext
+   * nós mesmos a cada N frames (cr1_tramp = MoveNext real). Só age a partir do
+   * CUP_DRIVECR_FROM (default 200, dá tempo do boot normal rodar) p/ não atropelar
+   * o pump do engine nas fases iniciais. */
+  extern long cr1_tramp(void *it); extern void *volatile g_startcr_it;
+  int drivecr = getenv("CUP_DRIVECR") ? 1 : 0;
+  int drivecr_from = getenv("CUP_DRIVECR_FROM") ? atoi(getenv("CUP_DRIVECR_FROM")) : 200;
+  if (drivecr) fprintf(stderr, "[DRIVECR] dirige start_cr MoveNext a partir do frame %d\n", drivecr_from);
   for (int f = 0; render && (max_f <= 0 || f < max_f); f++) {
     g_render_frame = f;  /* CUP_DRAWSPY: amarra os draws ao frame */
+    if (drivecr && f >= drivecr_from && g_startcr_it) cr1_tramp(g_startcr_it);
     if (drainN && g_preload_mgr) {
       for (int k = 0; k < drainN; k++) preload_step(g_preload_mgr, 2, 0x10);
     }
