@@ -1192,15 +1192,31 @@ BS_WRAP(7, "SettingsData.OnLoadedCloudData")
  * é NULL: o GameObject não monta o mesh (não renderiza), mas nada crasha. Epílogo é
  * void (caller 0x541c2c ignora o retorno). Substitui a abordagem fake-scene do island. */
 static long (*scene541_orig)(long, long, long, long, long, long, long, long);
-static volatile uint32_t g_sceneskip_hits;
+static volatile uint32_t g_sceneskip_hits, g_sceneadopt_hits;
+static void *volatile g_map_scene;   /* último scene handle VÁLIDO visto (p/ adoção) */
 static long scene541_hook(long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7) {
   void *scene = a0 ? *(void **)((char *)a0 + 56) : NULL;
-  if (!scene) {
-    if (g_sceneskip_hits < 8) fprintf(stderr, "[SCENESKIP] 0x541c9c scene=NULL -> skip GO (f=%d)\n", g_render_frame);
-    g_sceneskip_hits++;
-    return 0;
+  if (scene) {
+    g_map_scene = scene;   /* captura: objeto bem-registrado da cena do mapa */
+    return scene541_orig(a0, a1, a2, a3, a4, a5, a6, a7);
   }
-  return scene541_orig(a0, a1, a2, a3, a4, a5, a6, a7);
+  /* scene==NULL: o objeto (player/rig de câmera) está numa cena que o so-loader NÃO
+   * registrou. CUP_SCENEADOPT (opt-IN; default OFF=skip): tentou ADOTAR o objeto na cena
+   * válida (escreve scene real em [a0+56]) — mas FALHOU: o objeto está meio-construído
+   * (OUTROS campos null tb: idx/tilemap) -> deref selvagem em 0x541cdc (fault wild). Igual
+   * à fake-scene antiga. Raiz = integração async da cena aditiva nunca completa, não só o
+   * scene-link. Mantido GATED p/ referência; default = SKIP (mapa renderiza sem o player). */
+  if (a0 && g_map_scene && getenv("CUP_SCENEADOPT")) {
+    *(void **)((char *)a0 + 56) = g_map_scene;
+    if (g_sceneadopt_hits < 12)
+      fprintf(stderr, "[SCENEADOPT] 0x541c9c scene=NULL -> adotado na cena do mapa (%p, f=%d)\n",
+              g_map_scene, g_render_frame);
+    g_sceneadopt_hits++;
+    return scene541_orig(a0, a1, a2, a3, a4, a5, a6, a7);
+  }
+  if (g_sceneskip_hits < 8) fprintf(stderr, "[SCENESKIP] 0x541c9c scene=NULL -> skip GO (f=%d)\n", g_render_frame);
+  g_sceneskip_hits++;
+  return 0;
 }
 /* ===== CUP_NULLGUARD (s12): 3º crash do load do mapa =====
  * libunity 0x8f9b88 (função de tilemap/mesh, chamada de 0x541dcc) faz
