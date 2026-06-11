@@ -1864,6 +1864,14 @@ int main(int argc, char **argv) {
       __builtin___clear_cache((char *)(g_il2cpp_base + 0x9A567C), (char *)(g_il2cpp_base + 0x9A56F8));
       fprintf(stderr, "[FORCESTARTCR] Start() early-returns NOPados -> StartCoroutine(start_cr) forçado\n");
     }
+    /* CUP_NOREFRESHDLC: case 9 do start_cr chama DLCManager.RefreshDLC (0xC91C44) que
+       no so-loader crasha (blr p/ delegate de plataforma NULL = método il2cpp não-init)
+       -> coroutine de boot quebra no $PC=9. NOP a função inteira (ret) p/ pular. */
+    if (getenv("CUP_NOREFRESHDLC")) {
+      *(uint32_t *)(g_il2cpp_base + 0xC91C44) = 0xd65f03c0u; /* ret */
+      __builtin___clear_cache((char *)(g_il2cpp_base + 0xC91C44), (char *)(g_il2cpp_base + 0xC91C48));
+      fprintf(stderr, "[NOREFRESHDLC] DLCManager.RefreshDLC(0xC91C44) -> ret\n");
+    }
     if (getenv("CUP_SAPATH") || getenv("CUP_SAPATH_ON")) {
       hook_arm64(g_il2cpp_base + 0x17C7C1C, (uintptr_t)my_streamingAssetsPath);
       /* NÃO hookar getBasePath 0x1031C8C: é stub de 3 insns que JÁ tail-calleia
