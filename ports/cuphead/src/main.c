@@ -1957,11 +1957,19 @@ int main(int argc, char **argv) {
   int drainN = getenv("CUP_DRAINPRELOAD") ? atoi(getenv("CUP_DRAINPRELOAD")) : 0;
   void (*preload_step)(void *, int, int) = drainN ? (void (*)(void *, int, int))(g_unity_base + 0x8733a8) : NULL;
   if (drainN) fprintf(stderr, "[DRAINPRELOAD] %d steps/frame (UpdatePreloadingSingleStep=0x8733a8)\n", drainN);
+  /* CUP_DRAINWAIT: chama WaitForAllAsyncOperationsToComplete(mgr) (0x873a90) 1×/frame.
+   * Diferente do step cru, o WaitForAll roda o loop completo + a fase de "process"
+   * (0x738a98) que DISPARA OS CALLBACKS de conclusão das async ops -> o FontLoader
+   * vê as fontes como done e avança. ⚠️ pode pendurar se HasPendingOps nunca zerar. */
+  int drainWait = getenv("CUP_DRAINWAIT") ? 1 : 0;
+  void (*wait_all)(void *) = drainWait ? (void (*)(void *))(g_unity_base + 0x873a90) : NULL;
+  if (drainWait) fprintf(stderr, "[DRAINWAIT] WaitForAll(mgr)=0x873a90 1x/frame\n");
   for (int f = 0; render && (max_f <= 0 || f < max_f); f++) {
     g_render_frame = f;  /* CUP_DRAWSPY: amarra os draws ao frame */
     if (drainN && g_preload_mgr) {
       for (int k = 0; k < drainN; k++) preload_step(g_preload_mgr, 2, 0x10);
     }
+    if (drainWait && g_preload_mgr) wait_all(g_preload_mgr);
     if (f < 200) { fprintf(stderr, "[r%d>\n", f); dbg_sync(); }  /* ENTRA no render */
     if (g_skipbad) {
       /* arma o recovery: se nativeRender crashar nesta thread, volta aqui e pula o frame */
