@@ -467,8 +467,9 @@ static int my_open(const char *p, int fl, ...) {
   char rb[512];
   const char *r = asset_redirect(p, rb, sizeof rb);
   if (r) {
-    if (g_dllog) fprintf(stderr, "[open-redir] %s -> %s\n", p, r);
-    return open(r, fl);
+    int fd = open(r, fl);
+    if (g_dllog) fprintf(stderr, "[open-redir%s] %s -> %s\n", fd < 0 ? "-MISS" : "", p, r);
+    return fd;
   }
   va_list ap; va_start(ap, fl); int mo = va_arg(ap, int); va_end(ap);
   int fd = open(p, fl, mo);
@@ -1725,10 +1726,14 @@ static void *preload_bg_thread(void *arg) {
   /* só processa quando a loading-screen ESTÁ presa (g_haspend_stalled) — no boot
    * o engine bombeia as ops normalmente e processar em paralelo CORROMPE/trava
    * (render congelava em 1860). A detecção de stall só dispara no load do mapa
-   * (filas idênticas por N consultas), nunca no boot (ops fluem). */
+   * (filas idênticas por N consultas), nunca no boot (ops fluem).
+   * CUP_BG_AFTER=N: gate ALTERNATIVO por frame — processa tb se g_render_frame>N
+   * (p/ testar drenar a cena aditiva do mapa que NÃO gera stall detectável). */
+  long bg_after = getenv("CUP_BG_AFTER") ? atol(getenv("CUP_BG_AFTER")) : 0;
   while (g_fmod_run) {
     void *m = g_preload_mgr;
-    if (m && g_haspend_stalled) {
+    int active = g_haspend_stalled || (bg_after > 0 && g_render_frame > bg_after);
+    if (m && active) {
       int did = bg(m);   /* processa 1 op de background; !=0 = fez trabalho */
       if (did) {
         if ((n++ % 16) == 0)
