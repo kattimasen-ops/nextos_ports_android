@@ -2076,9 +2076,13 @@ int main(int argc, char **argv) {
      CupheadCore ainda referencia (a integração forçada cria objeto que o GC não
      rastreia). Sem GC no boot, nada é coletado -> sem UAF. (heap cresce; re-habilitar
      depois do título se preciso.) */
-  if (getenv("CUP_GCOFF") && g_il2cpp_base) {
+  int gcoff = (getenv("CUP_GCOFF") && g_il2cpp_base) ? 1 : 0;
+  /* religa o GC no frame CUP_GCON_F (default 350, bem depois do boot ~frame 200) p/ o
+     heap NÃO crescer indefinido (parado no disclaimer = OOM/thrash). 0 = nunca religa. */
+  int gcon_f = getenv("CUP_GCON_F") ? atoi(getenv("CUP_GCON_F")) : 350;
+  if (gcoff) {
     ((void (*)(void))(g_il2cpp_base + 0x1b62acc))();  /* il2cpp_gc_disable */
-    fprintf(stderr, "[GCOFF] il2cpp_gc_disable() - GC desligado no boot\n");
+    fprintf(stderr, "[GCOFF] il2cpp_gc_disable() no boot; religa GC no frame %d\n", gcon_f);
   }
   int gamepad_on = getenv("CUP_GAMEPAD") ? 1 : 0;
   extern void gp_poll(void); extern void gp_frame_end(void);
@@ -2091,6 +2095,12 @@ int main(int argc, char **argv) {
   if (loadyield) fprintf(stderr, "[LOADYIELD] %dus/frame nos 1ºs %d frames (CPU p/ workers)\n", loadyield, loadyield_f);
   for (int f = 0; render && (max_f <= 0 || f < max_f); f++) {
     g_render_frame = f;  /* CUP_DRAWSPY: amarra os draws ao frame */
+    if (gcoff && gcon_f > 0 && f == gcon_f) {
+      ((void (*)(void))(g_il2cpp_base + 0x1b62ac8))();  /* il2cpp_gc_enable */
+      ((void (*)(void))(g_il2cpp_base + 0x1b62ac0))();  /* il2cpp_gc_collect */
+      fprintf(stderr, "[GCOFF] GC RELIGADO + collect no frame %d (boot ja passou)\n", f);
+      fflush(stderr);
+    }
     if (loadyield && f < loadyield_f) { for (int y = 0; y < 4; y++) sched_yield(); usleep(loadyield); }
     if (gamepad_on) gp_poll();   /* drena eventos do js0 ANTES do frame ler input */
     if (drivecr && f >= drivecr_from && g_startcr_it) cr1_tramp(g_startcr_it);
