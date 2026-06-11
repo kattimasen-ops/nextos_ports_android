@@ -1233,6 +1233,25 @@ static long maskfn_hook(long a, long b, long c, long d, long e, long f, long g, 
   }
   return maskfn_orig(a, b, c, d, e, f, g, h);
 }
+/* ===== CUP_DESERGUARD (s13): crash #5 do load do mapa =====
+ * libunity 0x54220c (cluster de desserialização da cena; recebe arg0=ptr p/ um par
+ * {objeto, ...} na stack) faz `ldr x8,[arg0]` (objeto) e logo `ldr w9,[x8,#0xc]`
+ * (lê a classe/type do objeto) SEM null-check. Na cena do MAPA várias referências de
+ * objeto não resolvem (PPtr -> NULL) -> *arg0 == NULL -> x8=0 -> SIGSEGV fault=0xc em
+ * 0x542258. Pula a função quando *arg0==NULL (o objeto null não é processado; mesmo
+ * espírito do SCENESKIP). Caller (0x542474) usa o retorno como ponteiro/flag -> 0 é seguro
+ * (= "sem tipo/sem objeto"). */
+static long (*deser542_orig)(long, long, long, long, long, long, long, long);
+static volatile uint32_t g_deserguard_hits;
+static long deser542_hook(long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7) {
+  if (a0 == 0 || *(void **)a0 == NULL) {
+    if (g_deserguard_hits < 8)
+      fprintf(stderr, "[DESERGUARD] 0x54220c *arg0=NULL -> skip (f=%d)\n", g_render_frame);
+    g_deserguard_hits++;
+    return 0;
+  }
+  return deser542_orig(a0, a1, a2, a3, a4, a5, a6, a7);
+}
 static void bootspy_install(uintptr_t base) {
   struct { uintptr_t rva; void *hook; void **orig; const char *nm; } T[] = {
     {0x9A55CC, (void *)bs_hook_0, (void **)&bs_orig_0, "Start"},
@@ -1599,6 +1618,7 @@ static volatile int g_fmod_run = 1;
 #define UN_MTX_LOCK  0x8f5d0c
 #define UN_MTX_UNLK  0x8f5d14
 static volatile unsigned long g_haspend_calls;   /* quantas vezes a loading-screen consultou */
+static volatile int g_haspend_stalled;            /* filas presas (mesmas ops) — gate da bg thread */
 static int my_haspending(void *mgr) {
   g_preload_mgr = mgr;
   g_haspend_calls++;
@@ -1619,28 +1639,40 @@ static int my_haspending(void *mgr) {
    * persistente (não espera HasPendingOperations==0), mas a tela de loading do MAPA
    * espera -> trava eterna. Reportamos "sem pendências" p/ destravar a loading.
    * Só dispara em fila ESTÁVEL (sem progresso): se as ops mudam, é load real -> verdade. */
-  static long stale_thr = -1;
-  if (stale_thr == -1)
-    stale_thr = getenv("CUP_HASPEND_STALE") ? atol(getenv("CUP_HASPEND_STALE")) : 0;
-  if (pending && stale_thr > 0) {
+  static long stale_thr = -1, skip_thr = -1;
+  if (stale_thr == -1) {
+    /* detecção do stall: gate da bg thread (CUP_PRELOAD_BG). Limiar baixo p/ a bg
+       kickar logo que o mapa trava; no boot/gameplay as filas FLUEM (ops entram/saem)
+       -> nunca fica idêntico por tanto tempo -> bg fica ociosa, sem corromper o boot. */
+    stale_thr = getenv("CUP_BG_STALL") ? atol(getenv("CUP_BG_STALL")) : 24;
+    /* return-0 (pula a espera) — só se CUP_HASPEND_STALE setado (fallback bruto;
+       deixa objetos meio-construídos -> use PRELOAD_BG preferencialmente) */
+    skip_thr = getenv("CUP_HASPEND_STALE") ? atol(getenv("CUP_HASPEND_STALE")) : 0;
+  }
+  if (pending) {
     static uintptr_t last_pq, last_iq, last_pop, last_iop;
     static long stall;
     static int logged;
     if (pq == last_pq && iq == last_iq && pop == last_pop && iop == last_iop) {
-      if (++stall >= stale_thr) {
-        if (!logged) {
-          logged = 1;
-          fprintf(stderr, "[HASPEND] filas PRESAS %ld consultas (pq=%lu iq=%lu "
-                  "pop=%lx iop=%lx) -> reportando SEM pendencias (destrava loading)\n",
-                  stall, pq, iq, pop, iop);
-          dbg_sync();
-        }
+      stall++;
+      if (stall >= stale_thr && !g_haspend_stalled) {
+        g_haspend_stalled = 1;
+        fprintf(stderr, "[HASPEND] filas PRESAS (pq=%lu iq=%lu pop=%lx iop=%lx, %ld "
+                "consultas) -> bg thread liberada\n", pq, iq, pop, iop, stall);
+        dbg_sync();
+      }
+      if (skip_thr > 0 && stall >= skip_thr) {
+        if (!logged) { logged = 1;
+          fprintf(stderr, "[HASPEND] -> reportando SEM pendencias (CUP_HASPEND_STALE)\n");
+          dbg_sync(); }
         return 0;
       }
     } else {
-      stall = 0; logged = 0;
+      stall = 0; logged = 0; g_haspend_stalled = 0;
       last_pq = pq; last_iq = iq; last_pop = pop; last_iop = iop;
     }
+  } else {
+    g_haspend_stalled = 0;
   }
   return pending;
 }
@@ -1660,6 +1692,37 @@ static void pspy_dump_op(const char *qn, unsigned i, uintptr_t op) {
     fprintf(stderr, "[PSPY]   +%02x: %016lx %016lx %016lx %016lx\n", k * 8,
             ((uintptr_t *)op)[k], ((uintptr_t *)op)[k + 1],
             ((uintptr_t *)op)[k + 2], ((uintptr_t *)op)[k + 3]);
+}
+/* CUP_PRELOAD_BG: a thread UnityPreload (entry 0x8736cc) processa o BACKGROUND das
+ * ops de preload — 0x873900 faz: pop op da fila, chama op->vt[10] e op->vt[14], e
+ * seta done72=1. No so-loader essa thread NÃO bombeia (ops do load da cena do mapa
+ * ficam com done72=0 -> objetos meio-desserializados, campos null -> crashes
+ * 0x541cdc/0x8f9b1c/0x542258; E a integração na main BLOQUEIA esperando o bg da PQ op,
+ * por isso CUP_DRAINPRELOAD pendurava). Imitamos a thread faltante: chamamos
+ * 0x873900(mgr) em loop. A função trava internamente mgr+0x78 (thread-safe, igual à
+ * original); roda numa thread SEPARADA p/ não pendurar o render se uma op bloquear. */
+static void *preload_bg_thread(void *arg) {
+  (void)arg;
+  int (*bg)(void *) = (int (*)(void *))(g_unity_base + 0x873900);
+  fprintf(stderr, "[PRELOAD_BG] thread ativa (imita UnityPreload 0x873900)\n");
+  unsigned long n = 0;
+  /* só processa quando a loading-screen ESTÁ presa (g_haspend_stalled) — no boot
+   * o engine bombeia as ops normalmente e processar em paralelo CORROMPE/trava
+   * (render congelava em 1860). A detecção de stall só dispara no load do mapa
+   * (filas idênticas por N consultas), nunca no boot (ops fluem). */
+  while (g_fmod_run) {
+    void *m = g_preload_mgr;
+    if (m && g_haspend_stalled) {
+      int did = bg(m);   /* processa 1 op de background; !=0 = fez trabalho */
+      if (did) {
+        if ((n++ % 16) == 0)
+          fprintf(stderr, "[PRELOAD_BG] processou op presa (#%lu, f=%d)\n", n, g_render_frame);
+        continue;        /* mais ops pendentes? drena sem dormir */
+      }
+    }
+    usleep(2000);
+  }
+  return NULL;
 }
 static void *preload_spy_thread(void *arg) {
   (void)arg;
@@ -1997,6 +2060,16 @@ int main(int argc, char **argv) {
       so_make_text_executable(); so_flush_caches();
       fprintf(stderr, "[NULLGUARD] hook 0x8f9b88 (skip se arg0==NULL)\n");
     }
+    /* DESERGUARD: 0x54220c (desserialização, *arg0 NULL no mapa) — crash #5 */
+    void *trd = mk_tramp((uintptr_t)text_base + 0x54220c, "deser542");
+    if (trd) {
+      deser542_orig = (long (*)(long, long, long, long, long, long, long, long))trd;
+      extern void so_make_text_writable(void), so_make_text_executable(void);
+      so_make_text_writable();
+      hook_arm64((uintptr_t)text_base + 0x54220c, (uintptr_t)deser542_hook);
+      so_make_text_executable(); so_flush_caches();
+      fprintf(stderr, "[DESERGUARD] hook 0x54220c (skip se *arg0==NULL)\n");
+    }
   }
   /* CUP_WAITGATE: FORCEINTEG cirúrgico — ignora o gate de budget SÓ dentro do
      WaitForAll (0x873a90). Hook do WaitForAll (flag in_waitall) + hook do gate
@@ -2235,6 +2308,10 @@ int main(int argc, char **argv) {
   if (getenv("CUP_PSPY")) {
     pthread_t st; pthread_create(&st, NULL, preload_spy_thread, NULL);
     pthread_detach(st);
+  }
+  if (getenv("CUP_PRELOAD_BG")) {
+    pthread_t bt; pthread_create(&bt, NULL, preload_bg_thread, NULL);
+    pthread_detach(bt);
   }
   void *render = jni_find_native("nativeRender");
   fprintf(stderr, "[F2] nativeRender=%p -> loop\n", render);
