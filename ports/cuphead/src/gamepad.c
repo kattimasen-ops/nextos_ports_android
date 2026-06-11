@@ -299,7 +299,24 @@ int gp_GetAnyButtonDown(void *self) {
   return 0;
 }
 
+/* CUP_GPJOIN: o menu do Cuphead ignora input se o Rewired acha que não há controle
+   atribuído ao player (player não "joined"). Forçamos: isPlaying=true + joystickCount=1
+   (player E global). Assim o menu processa a navegação/seleção dos meus hooks. */
+int gp_isPlaying(void *self) { (void)self; return 1; }
+int gp_joystickCount(void *self) { (void)self; return 1; }
+static int g_gpjoin = 0;
+
 void gp_install_hooks(uintptr_t base) {
+  if (g_gpjoin) {
+    hook_arm64(base + 0x11a51bc, (uintptr_t)gp_isPlaying);     /* Player.get_isPlaying -> true */
+    /* ⚠️ joystickCount=1 CRASHA (SIGILL): o jogo acessa Joysticks[0] que não existe.
+       Só com CUP_GPJOIN_JC (arriscado). isPlaying sozinho é seguro. */
+    if (getenv("CUP_GPJOIN_JC")) {
+      hook_arm64(base + 0x11ab958, (uintptr_t)gp_joystickCount);
+      hook_arm64(base + 0xedfc10,  (uintptr_t)gp_joystickCount);
+    }
+    fprintf(stderr, "[GPJOIN] isPlaying=true%s\n", getenv("CUP_GPJOIN_JC") ? " + joystickCount=1" : "");
+  }
   /* string-overloads do Rewired.Player (RVAs do dump) */
   hook_arm64(base + 0x11a5378, (uintptr_t)gp_GetButton);     /* GetButton(string)     */
   hook_arm64(base + 0x11a5448, (uintptr_t)gp_GetButtonDown); /* GetButtonDown(string) */
@@ -317,6 +334,7 @@ void gp_install_hooks(uintptr_t base) {
 void gp_init(uintptr_t il2cpp_base) {
   gp_log = getenv("CUP_GPLOG") ? 1 : 0;
   gp_virt = getenv("CUP_GPVIRT") ? 1 : 0;
+  g_gpjoin = getenv("CUP_GPJOIN") ? 1 : 0;
   if (getenv("CUP_GP_AXH")) gp_axh = atoi(getenv("CUP_GP_AXH"));
   if (getenv("CUP_GP_AXV")) gp_axv = atoi(getenv("CUP_GP_AXV"));
   if (getenv("CUP_GP_AXH2")) gp_axh2 = atoi(getenv("CUP_GP_AXH2"));
