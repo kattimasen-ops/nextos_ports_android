@@ -390,9 +390,20 @@ static FILE *my_fopen(const char *p, const char *m) {
    pega o sufixo após "bin/Data/", senão o basename de arquivos conhecidos do
    engine — globalgamemanagers, level*, sharedassets*, *.assets/.resS/.resource). */
 static const char *asset_redirect(const char *p, char *buf, size_t bufsz) {
+  if (!p) return NULL;
+  /* QUALQUER path .../AssetBundles/<nome> -> /storage/cuphead-sa/AssetBundles/<nome>.
+     Resolve o load do DLC (base-path vinha lixo: "Шестигранные врата 1/AssetBundles/..")
+     e qualquer base estranha; o path correto redireciona p/ si mesmo (anti-loop). */
+  const char *ab = strstr(p, "/AssetBundles/");
+  if (ab) {
+    const char *sap = getenv("CUP_SAPATH"); if (!sap) sap = "/storage/cuphead-sa";
+    snprintf(buf, bufsz, "%s/AssetBundles/%s", sap, ab + 14);
+    if (strcmp(buf, p) != 0 && access(buf, F_OK) == 0) return buf;
+    return NULL;
+  }
   /* anti-loop: só pula o que JÁ aponta pro alvo (bin/Data real); paths de
      userdata/ sob a base ainda precisam de redirect (il2cpp/Metadata) */
-  if (!p || !strncmp(p, ASSET_BASE_M "bin/Data/", sizeof(ASSET_BASE_M "bin/Data/") - 1)) return NULL;
+  if (!strncmp(p, ASSET_BASE_M "bin/Data/", sizeof(ASSET_BASE_M "bin/Data/") - 1)) return NULL;
   const char *sub = strstr(p, "bin/Data/");
   if (sub) {
     snprintf(buf, bufsz, ASSET_BASE_M "bin/Data/%s", sub + 9);
@@ -699,9 +710,10 @@ static void ds_rectex(int w, int h, const char *what) {
   }
   if (w > 2048 || h > 2048) { fprintf(stderr, "[DS] BIG TEX %s id=%d %dx%d\n", what, t, w, h); fsync(2); }
 }
-/* CUP_TEXHALF=N: downscale 2× (nearest) das texturas nivel-0 não-comprimidas com
- * max(w,h) >= N. Reduz RAM/VRAM e evita o limite do Utgard (textura grande pendura
- * o GPU = "não é memória, algo quebra"). Receita Bully/Castlevania. px!=NULL só. */
+/* CUP_TEXHALF=N: downscale (nearest) das texturas nivel-0 não-comprimidas até
+ * caberem no teto N (max(w,h) <= N). N=512 → 2048 vira 512 (1/16 da RAM/VRAM!).
+ * Reduz drasticamente p/ o load de assets persistentes caber em 832MB + evita o
+ * limite do Utgard. Receita Bully/Castlevania (agressiva). px!=NULL só. */
 static int g_texhalf = 0;
 static int gl_bpp(unsigned fmt, unsigned type) {
   switch (type) {
@@ -714,34 +726,37 @@ static int gl_bpp(unsigned fmt, unsigned type) {
   }
   return 0;  /* desconhecido -> não mexe */
 }
-static unsigned char ds_halved[DS_MAXTEXID];  /* tex ids cujo nivel-0 foi reduzido */
+static unsigned char ds_shift[DS_MAXTEXID];  /* fator de downscale (log2) por tex id */
 static void my_glTexImage2D(unsigned tgt, int lvl, int ifmt, int w, int h, int b, unsigned fmt, unsigned type, const void *px) {
   if (lvl == 0 && tgt == 0x0DE1) ds_rectex(w, h, "tex");
   int tid = (g_texhalf && tgt == 0x0DE1) ? ds_geti(0x8069) : 0;
-  int want = 0;
-  if (g_texhalf && tgt == 0x0DE1 && px && w >= 2 && h >= 2 && !(w & 1) && !(h & 1)) {
-    if (lvl == 0 && (w >= g_texhalf || h >= g_texhalf)) want = 1;            /* nivel-0 grande */
-    else if (lvl > 0 && tid > 0 && tid < DS_MAXTEXID && ds_halved[tid]) want = 1; /* manter chain */
+  int shift = 0;
+  if (g_texhalf && tgt == 0x0DE1 && px && gl_bpp(fmt, type) > 0) {
+    if (lvl == 0) {
+      int mw = w, mh = h;
+      while ((mw > g_texhalf || mh > g_texhalf) && mw > 1 && mh > 1) { mw >>= 1; mh >>= 1; shift++; }
+      if (tid > 0 && tid < DS_MAXTEXID) ds_shift[tid] = (unsigned char)shift;
+    } else if (tid > 0 && tid < DS_MAXTEXID) {
+      shift = ds_shift[tid];                          /* mesma chain do nivel-0 */
+      while (shift > 0 && ((w >> shift) < 1 || (h >> shift) < 1)) shift--;
+    }
   }
-  if (want) {
+  if (shift > 0) {
     int bpp = gl_bpp(fmt, type);
-    if (bpp > 0) {
-      int nw = w >> 1, nh = h >> 1;
-      unsigned char *dst = malloc((size_t)nw * nh * bpp);
-      if (dst) {
-        const unsigned char *src = px;
-        for (int y = 0; y < nh; y++) {
-          const unsigned char *srow = src + (size_t)(y * 2) * w * bpp;
-          unsigned char *drow = dst + (size_t)y * nw * bpp;
-          for (int x = 0; x < nw; x++)
-            memcpy(drow + x * bpp, srow + (x * 2) * bpp, bpp);
-        }
-        if (lvl == 0 && tid > 0 && tid < DS_MAXTEXID) ds_halved[tid] = 1;
-        static int n; if (n++ < 40) { fprintf(stderr, "[TEXHALF] tex=%d %dx%d -> %dx%d (lvl%d fmt=%x bpp=%d)\n", tid, w, h, nw, nh, lvl, fmt, bpp); fsync(2); }
-        ds_r_TexImage2D(tgt, lvl, ifmt, nw, nh, b, fmt, type, dst);
-        free(dst);
-        return;
+    int nw = w >> shift, nh = h >> shift, st = 1 << shift;
+    unsigned char *dst = malloc((size_t)nw * nh * bpp);
+    if (dst) {
+      const unsigned char *src = px;
+      for (int y = 0; y < nh; y++) {
+        const unsigned char *srow = src + (size_t)(y * st) * w * bpp;
+        unsigned char *drow = dst + (size_t)y * nw * bpp;
+        for (int x = 0; x < nw; x++)
+          memcpy(drow + x * bpp, srow + (size_t)(x * st) * bpp, bpp);
       }
+      static int n; if (n++ < 40) { fprintf(stderr, "[TEXHALF] tex=%d %dx%d -> %dx%d (/%d lvl%d)\n", tid, w, h, nw, nh, st, lvl); fsync(2); }
+      ds_r_TexImage2D(tgt, lvl, ifmt, nw, nh, b, fmt, type, dst);
+      free(dst);
+      return;
     }
   }
   ds_r_TexImage2D(tgt, lvl, ifmt, w, h, b, fmt, type, px);
@@ -1203,6 +1218,15 @@ void *my_streamingAssetsPath(void) {
     fsync(2);
   }
   return g_sa_string;
+}
+/* AssetBundleLoader.getBasePath(location) (il2cpp 0x1031C8C): p/ StreamingAssets usa
+ * streamingAssetsPath (já overridado), mas p/ DLC (location=1) usa OUTRA fonte que no
+ * so-loader retorna string-lixo ("Шестигранные врата 1") → o load de DLC persistente
+ * falha. Override: retorna SEMPRE o nosso path real (ignora location). */
+void *my_getbasepath(int location);
+void *my_getbasepath(int location) {
+  (void)location;
+  return my_streamingAssetsPath();  /* mesmo dir; loader anexa "/AssetBundles/"+nome */
 }
 
 static char g_dl_sl; /* sentinela do handle de libOpenSLES (FMOD → opensles_shim) */
@@ -1840,6 +1864,8 @@ int main(int argc, char **argv) {
     }
     if (getenv("CUP_SAPATH") || getenv("CUP_SAPATH_ON")) {
       hook_arm64(g_il2cpp_base + 0x17C7C1C, (uintptr_t)my_streamingAssetsPath);
+      /* NÃO hookar getBasePath 0x1031C8C: é stub de 3 insns que JÁ tail-calleia
+         get_streamingAssetsPath (hookado); o hook de 16B estoura na função seguinte. */
       fprintf(stderr, "[SAPATH] hook get_streamingAssetsPath(0x17C7C1C)\n");
     }
     if (getenv("CUP_TAPINPUT")) {
