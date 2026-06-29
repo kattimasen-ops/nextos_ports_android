@@ -1,0 +1,41 @@
+name: Compile Dysmantle Port
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Build with Docker (GLIBC 2.27 Compatibility)
+        run: |
+          # Wir nutzen Debian Bullseye (wie im Repo beschrieben) um sicherzustellen,
+          # dass die glibc-Version 2.27 kompatibel ist.
+          docker run --rm -v "$PWD":/repo debian:bullseye bash -c "
+            apt-get update && apt-get install -y build-essential libsdl2-dev
+            cd /repo
+            # Build des Haupt-Binaries
+            bash build_compat_gcc.sh
+            # Build des fixpak-Tools (wichtig für die Textur-Fixes)
+            gcc -O2 -o fixpak src/fixpak.c src/etc2_decode.c src/jpeg_enc.c -ldl
+          "
+
+      - name: Prepare Artifacts
+        run: |
+          mkdir -p output
+          mv dysmantle.compat.gcc output/dysmantle
+          mv fixpak output/
+          # Kopiere alle anderen nötigen Dateien (Skripte/Konfigs)
+          cp -r ports/dysmantle/* output/ 2>/dev/null || true
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dysmantle-r36s-binary
+          path: output/
