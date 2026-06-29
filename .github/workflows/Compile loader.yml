@@ -3,29 +3,87 @@ name: Build Dysmantle Port
 on:
   push:
     branches: [ master, main ]
+  workflow_dispatch: # Fügt einen Button in GitHub hinzu, um den Build manuell zu starten!
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build Binary and Fixpak
+
+      - name: Build Binary and Fixpak in Docker
         run: |
           docker run --rm -v "$PWD":/repo debian:bullseye bash -c "
-            apt-get update && apt-get install -y build-essential libsdl2-dev
+            # Installiere Cross-Compiler für aarch64 und SDL2-Abhängigkeiten
+            apt-get update && apt-get install -y build-essential crossbuild-essential-arm64 libsdl2-dev
+            
             cd /repo/ports/dysmantle
+            
+            # 1. Baue zuerst das native Binary (wird für die Stubs benötigt)
+            bash build.sh
+            
+            # 2. Baue danach die GLIBC 2.27 kompatible Version für den R36S
             bash build_compat_gcc.sh
+            
+            # 3. Baue das Texturen-Fix-Tool
             gcc -O2 -o fixpak src/fixpak.c src/etc2_decode.c src/jpeg_enc.c -ldl
           "
-      - name: Prepare Package
+
+      - name: Prepare Package and Generate Scripts
         run: |
           mkdir -p dist/dysmantle
+          
+          # Kopiere die fertigen Binaries in unseren dist-Ordner
           cp ports/dysmantle/dysmantle.compat.gcc dist/dysmantle/dysmantle
           cp ports/dysmantle/fixpak dist/dysmantle/
-          cp ports/dysmantle/*.gptk dist/dysmantle/
-          # Kopiere das Launcher-Skript (siehe unten)
-          cp launcher.sh dist/dysmantle/
+          
+          # Generiere launcher.sh direkt aus dem Workflow
+          cat << 'EOF' > dist/dysmantle/launcher.sh
+          #!/bin/bash
+          XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+          cd "$(dirname "$0")"
+          
+          # R36S spezifische Pfade und Grafik-Variablen (Mali/gl4es)
+          export LD_LIBRARY_PATH=./libs:$LD_LIBRARY_PATH
+          export SDL_GAMECONTROLLERCONFIG_FILE="./gamecontrollerdb.txt"
+          export LIBGL_FB=1
+          export LIBGL_ES=2
+          export LIBGL_GL=21
+          export LIBGL_WINSYS=1
+          
+          # Starte die Steuerung im Hintergrund und dann das Spiel
+          ./gptokeyb "dysmantle" -c "dysmantle.gptk" &
+          ./dysmantle
+          EOF
+          
+          # Mache den Launcher ausführbar
+          chmod +x dist/dysmantle/launcher.sh
+          
+          # Generiere die Steuerungs-Konfiguration (gptokeyb)
+          cat << 'EOF' > dist/dysmantle/dysmantle.gptk
+          back = esc
+          start = enter
+          a = space
+          b = shift
+          x = f
+          y = e
+          l1 = q
+          r1 = r
+          l2 = 1
+          r2 = 2
+          up = up
+          down = down
+          left = left
+          right = right
+          left_analog_up = up
+          left_analog_down = down
+          left_analog_left = left
+          left_analog_right = right
+          EOF
+          
+          # Erstelle das fertige Archiv für den R36S
           tar -cvzf dysmantle-r36s.tar.gz -C dist dysmantle
+
       - uses: actions/upload-artifact@v4
         with:
           name: dysmantle-r36s-package
